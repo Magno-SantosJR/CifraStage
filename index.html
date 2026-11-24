@@ -1,0 +1,1158 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#09090b" />
+  <title>CifraStage — Leitor de Palco</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "@angular/core": "https://esm.sh/@angular/core@19.2.0",
+      "@angular/common": "https://esm.sh/@angular/common@19.2.0",
+      "@angular/platform-browser": "https://esm.sh/@angular/platform-browser@19.2.0",
+      "@angular/compiler": "https://esm.sh/@angular/compiler@19.2.0",
+      "rxjs": "https://esm.sh/rxjs@7.8.1",
+      "pdfjs-dist": "https://esm.sh/pdfjs-dist@4.10.38"
+    }
+  }
+  </script>
+
+  <style>
+    body {
+      background-color: #09090b;
+      color: #f4f4f5;
+      font-family: system-ui, -apple-system, sans-serif;
+      overscroll-behavior: none;
+    }
+    .font-cifra {
+      font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #09090b; }
+    ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 3px; }
+  </style>
+</head>
+<body class="h-screen w-screen overflow-hidden select-none">
+
+  <app-root>
+    <div style="padding: 2rem; color: #a1a1aa; font-family: sans-serif;">
+      Carregando CifraStage...
+    </div>
+  </app-root>
+
+  <script type="module">
+    import '@angular/compiler';
+    import { Component, signal, computed, effect, provideExperimentalZonelessChangeDetection } from '@angular/core';
+    import { bootstrapApplication } from '@angular/platform-browser';
+    import * as pdfjsLib from 'pdfjs-dist';
+
+    // Configura o Worker do PDF.js para processar PDFs sem travar a interface
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@4.10.38/build/pdf.worker.mjs';
+
+    // =========================================================================
+    // 1. MOTOR MUSICAL
+    // =========================================================================
+    const NOTES_SHARP = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    const NOTES_FLAT  = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
+    const NOTE_TO_INDEX = {
+      'C': 0, 'B#': 0, 'C#': 1, 'Db': 1, 'D': 2, 'D#': 3, 'Eb': 3,
+      'E': 4, 'Fb': 4, 'F': 5, 'E#': 5, 'F#': 6, 'Gb': 6, 'G': 7,
+      'G#': 8, 'Ab': 8, 'A': 9, 'A#': 10, 'Bb': 10, 'B': 11, 'Cb': 11
+    };
+
+    const CHORD_TOKEN_REGEX = /^([A-G][#b]?)(m|maj|min|dim|aug|sus|add|M|[0-9+#b()°ø-])*(\/[A-G][#b]?)?$/;
+
+    function transposeNote(noteStr, semitones, preferFlat = false) {
+      const idx = NOTE_TO_INDEX[noteStr];
+      if (idx === undefined) return noteStr;
+      const newIdx = ((idx + semitones) % 12 + 12) % 12;
+      return preferFlat ? NOTES_FLAT[newIdx] : NOTES_SHARP[newIdx];
+    }
+
+    function transposeSingleChord(chordStr, semitones, preferFlat = false) {
+      if (semitones === 0) return chordStr;
+      const match = chordStr.match(/^([A-G][#b]?)(.*?)(\/([A-G][#b]?))?$/);
+      if (!match) return chordStr;
+      const [, root, suffix, , bass] = match;
+      const newRoot = transposeNote(root, semitones, preferFlat);
+      const newBass = bass ? '/' + transposeNote(bass, semitones, preferFlat) : '';
+      return `${newRoot}${suffix}${newBass}`;
+    }
+
+    function isChordLine(line) {
+      const trimmed = line.trim();
+      if (!trimmed) return false;
+      const withoutTags = trimmed.replace(/\[[^\]]+\]/g, '').trim();
+      if (!withoutTags) return false;
+      const tokens = withoutTags.split(/\s+/);
+      let chordCount = 0;
+      for (const token of tokens) {
+        if (/^[|\/\\.-]+$/.test(token)) continue;
+        if (CHORD_TOKEN_REGEX.test(token)) chordCount++;
+      }
+      const validTokens = tokens.filter(t => !/^[|\/\\.-]+$/.test(t));
+      return validTokens.length > 0 && (chordCount / validTokens.length) >= 0.6;
+    }
+
+    function transposeLineWithAlignment(line, semitones, preferFlat = false) {
+      if (semitones === 0) return line;
+      return line.replace(/(\S+)(\s*)/g, (fullMatch, token, spaces) => {
+        if (!CHORD_TOKEN_REGEX.test(token)) return fullMatch;
+        const transposed = transposeSingleChord(token, semitones, preferFlat);
+        const lengthDiff = transposed.length - token.length;
+        if (!spaces) return transposed;
+        if (lengthDiff > 0) {
+          return transposed + ' '.repeat(Math.max(1, spaces.length - lengthDiff));
+        } else if (lengthDiff < 0) {
+          return transposed + ' '.repeat(spaces.length + Math.abs(lengthDiff));
+        }
+        return transposed + spaces;
+      });
+    }
+
+    function detectOriginalKey(rawContent) {
+      const lines = rawContent.split('\n');
+      for (const line of lines) {
+        if (isChordLine(line)) {
+          const tokens = line.replace(/\[[^\]]+\]/g, '').trim().split(/\s+/);
+          for (const t of tokens) {
+            if (CHORD_TOKEN_REGEX.test(t)) {
+              const m = t.match(/^([A-G][#b]?m?)/);
+              if (m) return m[1];
+            }
+          }
+        }
+      }
+      return 'C';
+    }
+
+    // =========================================================================
+    // 2. EXTRATOR DE PDF COM RECONSTRUÇÃO ESPACIAL (EIXOS X e Y)
+    // =========================================================================
+    async function extractAlignedTextFromPdf(arrayBuffer) {
+      const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+      const pdf = await loadingTask.promise;
+      const allPagesLines = [];
+
+      for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const textContent = await page.getTextContent();
+
+        // Extrai cada fragmento com suas coordenadas X, Y e largura real
+        const items = textContent.items
+          .filter(item => item.str && item.str.trim().length > 0)
+          .map(item => ({
+            str: item.str,
+            x: item.transform[4],
+            y: item.transform[5],
+            width: item.width || (item.str.length * 6),
+            charWidth: (item.width && item.str.length > 0) ? (item.width / item.str.length) : 6
+          }));
+
+        if (items.length === 0) continue;
+
+        // 1. Ordena de cima para baixo (no PDF, Y cresce para cima, então b.y - a.y)
+        items.sort((a, b) => b.y - a.y);
+
+        // 2. Agrupa itens na mesma linha visual (tolerância vertical de 4.5 unidades)
+        const rows = [];
+        for (const item of items) {
+          const existingRow = rows.find(r => Math.abs(r.y - item.y) <= 4.5);
+          if (existingRow) {
+            existingRow.items.push(item);
+          } else {
+            rows.push({ y: item.y, items: [item] });
+          }
+        }
+
+        // Calcula largura média de 1 caractere na página para converter distância X em espaços
+        const avgCharWidth = items.reduce((acc, it) => acc + it.charWidth, 0) / items.length || 6;
+        const minX = Math.min(...items.map(it => it.x));
+
+        // 3. Para cada linha, ordena da esquerda para direita (eixo X) e insere espaços proporcionais
+        let previousY = null;
+        for (const row of rows) {
+          // Se houver um salto vertical grande entre linhas, preserva uma linha em branco
+          if (previousY !== null && (previousY - row.y) > 22) {
+            allPagesLines.push('');
+          }
+          previousY = row.y;
+
+          row.items.sort((a, b) => a.x - b.x);
+          let lineStr = '';
+          let cursorX = minX;
+
+          for (const item of row.items) {
+            const gapX = item.x - cursorX;
+            if (gapX > avgCharWidth * 0.45) {
+              const spacesNeeded = Math.max(1, Math.round(gapX / avgCharWidth));
+              lineStr += ' '.repeat(spacesNeeded);
+            }
+            lineStr += item.str;
+            cursorX = item.x + item.width;
+          }
+
+          allPagesLines.push(lineStr.replace(/\s+$/, ''));
+        }
+
+        if (pageNum < pdf.numPages) {
+          allPagesLines.push(''); // Separação entre páginas
+        }
+      }
+
+      return allPagesLines.join('\n');
+    }
+
+    function parseMetadataFromFilename(filename) {
+      const cleanName = filename.replace(/\.(pdf|txt)$/i, '').trim();
+      const parts = cleanName.split(/\s+-\s+/);
+      if (parts.length >= 2) {
+        return {
+          title: parts[0].trim(),
+          artist: parts.slice(1).join(' - ').trim()
+        };
+      }
+      return { title: cleanName, artist: 'Importado' };
+    }
+
+    // =========================================================================
+    // 3. DADOS INICIAIS
+    // =========================================================================
+    const DEMO_SONGS = [
+      {
+        id: 'song-1',
+        title: 'Tempo Perdido',
+        artist: 'Legião Urbana',
+        genre: 'Rock Nacional',
+        originalKey: 'C',
+        transpose: 0,
+        rawContent: `[Intro] C  Am7  Bm  Em\n\nC               Am7\nTodos os dias quando acordo\nBm                   Em\nNão tenho mais o tempo que passou\nC              Am7\nMas tenho muito tempo\nBm             Em\nTemos todo o tempo do mundo`
+      },
+      {
+        id: 'song-2',
+        title: 'Evidências',
+        artist: 'Chitãozinho & Xororó',
+        genre: 'Sertanejo',
+        originalKey: 'E',
+        transpose: 0,
+        rawContent: `E                  B/D#\nQuando eu digo que deixei de te amar\nC#m                G#m\nÉ porque eu te amo\nA                  E/G#\nQuando eu digo que não quero mais você\nF#m          B7\nÉ porque eu te quero`
+      }
+    ];
+
+    const DEMO_SETLISTS = [
+      { id: 'set-1', name: 'Show Acústico Sábado', songIds: ['song-1', 'song-2'] }
+    ];
+
+    // =========================================================================
+    // 4. COMPONENTE PRINCIPAL
+    // =========================================================================
+    class AppComponent {
+      constructor() {
+        this.songs = signal(this.loadStorage('cifrastage_songs', DEMO_SONGS));
+        this.setlists = signal(this.loadStorage('cifrastage_setlists', DEMO_SETLISTS));
+        this.fontSize = signal(this.loadStorage('cifrastage_fontsize', 18));
+
+        this.navMode = signal('library');
+        this.activeSetlistId = signal(this.setlists()[0]?.id || '');
+        this.activeSongId = signal(this.songs()[0]?.id || '');
+        this.searchQuery = signal('');
+        this.selectedGenre = signal('');
+        this.selectedArtist = signal('');
+
+        this.stageMode = signal(false);
+        this.wakeLockActive = signal(false);
+        this.wakeLockSentinel = null;
+
+        this.isScrolling = signal(false);
+        this.scrollSpeed = signal(2);
+        this.scrollAccumulator = 0;
+        this.scrollRafId = null;
+
+        // Importação e Drag & Drop
+        this.isDragging = signal(false);
+        this.isImporting = signal(false);
+        this.importToast = signal('');
+
+        // Modais
+        this.editorOpen = signal(false);
+        this.editingSongId = signal(null);
+        this.formTitle = signal('');
+        this.formArtist = signal('');
+        this.formGenre = signal('');
+        this.formContent = signal('');
+
+        this.setlistModalOpen = signal(false);
+        this.newSetlistName = signal('');
+
+        // --- COMPUTEDS ---
+        this.availableGenres = computed(() => {
+          const genres = new Set(this.songs().map(s => s.genre).filter(Boolean));
+          return Array.from(genres).sort((a, b) => a.localeCompare(b));
+        });
+
+        this.availableArtists = computed(() => {
+          const genre = this.selectedGenre();
+          const filtered = genre ? this.songs().filter(s => s.genre === genre) : this.songs();
+          const artists = new Set(filtered.map(s => s.artist).filter(Boolean));
+          return Array.from(artists).sort((a, b) => a.localeCompare(b));
+        });
+
+        this.currentSetlist = computed(() => {
+          return this.setlists().find(s => s.id === this.activeSetlistId()) || null;
+        });
+
+        this.displayedSongs = computed(() => {
+          if (this.navMode() === 'setlist') {
+            const currentSet = this.currentSetlist();
+            if (!currentSet) return [];
+            return currentSet.songIds
+              .map(id => this.songs().find(s => s.id === id))
+              .filter(Boolean);
+          }
+
+          const q = this.searchQuery().toLowerCase().trim();
+          const genre = this.selectedGenre();
+          const artist = this.selectedArtist();
+
+          return this.songs().filter(song => {
+            if (genre && song.genre !== genre) return false;
+            if (artist && song.artist !== artist) return false;
+            if (q && !song.title.toLowerCase().includes(q) && !song.artist.toLowerCase().includes(q)) {
+              return false;
+            }
+            return true;
+          });
+        });
+
+        this.activeSong = computed(() => {
+          return this.songs().find(s => s.id === this.activeSongId()) || null;
+        });
+
+        this.currentSongKey = computed(() => {
+          const song = this.activeSong();
+          if (!song) return '';
+          const preferFlat = song.originalKey.includes('b');
+          return transposeSingleChord(song.originalKey, song.transpose || 0, preferFlat);
+        });
+
+        this.renderedLines = computed(() => {
+          const song = this.activeSong();
+          if (!song) return [];
+
+          const steps = song.transpose || 0;
+          const preferFlat = this.currentSongKey().includes('b');
+
+          return song.rawContent.split('\n').map((rawLine, index) => {
+            const chordLine = isChordLine(rawLine);
+            const text = chordLine
+              ? transposeLineWithAlignment(rawLine, steps, preferFlat)
+              : rawLine;
+
+            const segments = [];
+            if (chordLine) {
+              const parts = text.split(/(\s+|\[[^\]]+\])/);
+              for (const part of parts) {
+                if (!part) continue;
+                if (/^\[[^\]]+\]$/.test(part)) {
+                  segments.push({ text: part, type: 'tag' });
+                } else if (CHORD_TOKEN_REGEX.test(part)) {
+                  segments.push({ text: part, type: 'chord' });
+                } else {
+                  segments.push({ text: part, type: 'space' });
+                }
+              }
+            } else {
+              segments.push({ text, type: 'lyric' });
+            }
+            return { id: index, isChordLine: chordLine, segments };
+          });
+        });
+
+        effect(() => localStorage.setItem('cifrastage_songs', JSON.stringify(this.songs())));
+        effect(() => localStorage.setItem('cifrastage_setlists', JSON.stringify(this.setlists())));
+        effect(() => localStorage.setItem('cifrastage_fontsize', JSON.stringify(this.fontSize())));
+      }
+
+      // --- IMPORTAÇÃO EM LOTE E DRAG & DROP (.PDF e .TXT) ---
+      onDragOver(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.isDragging.set(true);
+      }
+
+      onDragLeave(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.currentTarget === event.target) {
+          this.isDragging.set(false);
+        }
+      }
+
+      async onDropFiles(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.isDragging.set(false);
+        const files = Array.from(event.dataTransfer?.files || []);
+        if (files.length > 0) {
+          await this.processImportedFiles(files, false);
+        }
+      }
+
+      async onFileInputChange(event, intoEditor = false) {
+        const files = Array.from(event.target.files || []);
+        event.target.value = ''; // Permite reimportar o mesmo arquivo se desejar
+        if (files.length > 0) {
+          await this.processImportedFiles(files, intoEditor);
+        }
+      }
+
+      async processImportedFiles(files, intoEditor = false) {
+        const validFiles = files.filter(f => /\.(pdf|txt)$/i.test(f.name));
+        if (validFiles.length === 0) {
+          this.showToast('Selecione apenas arquivos .pdf ou .txt');
+          return;
+        }
+
+        this.isImporting.set(true);
+        const importedSongs = [];
+
+        try {
+          for (const file of validFiles) {
+            let rawContent = '';
+            if (file.name.toLowerCase().endsWith('.pdf')) {
+              const buffer = await file.arrayBuffer();
+              rawContent = await extractAlignedTextFromPdf(buffer);
+            } else {
+              rawContent = await file.text();
+            }
+
+            // Normaliza quebras de linha Windows/Mac
+            rawContent = rawContent.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+            const meta = parseMetadataFromFilename(file.name);
+            const detectedKey = detectOriginalKey(rawContent);
+
+            importedSongs.push({
+              id: 'song-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+              title: meta.title,
+              artist: meta.artist,
+              genre: this.selectedGenre() || 'Importados',
+              originalKey: detectedKey,
+              transpose: 0,
+              rawContent
+            });
+          }
+
+          // Se importou 1 arquivo de dentro do editor aberto, preenche os campos do editor
+          if (intoEditor && importedSongs.length === 1) {
+            const first = importedSongs[0];
+            if (!this.formTitle().trim()) this.formTitle.set(first.title);
+            if (!this.formArtist().trim()) this.formArtist.set(first.artist);
+            this.formContent.set(first.rawContent);
+            this.showToast('Conteúdo carregado no editor!');
+          } else {
+            // Salva todas diretamente no repertório offline
+            this.songs.update(list => [...importedSongs, ...list]);
+            this.activeSongId.set(importedSongs[0].id);
+            this.navMode.set('library');
+            this.selectedGenre.set('');
+            this.selectedArtist.set('');
+            this.showToast(`${importedSongs.length} cifra(s) importada(s) com sucesso!`);
+          }
+        } catch (err) {
+          console.error('Erro na importação:', err);
+          this.showToast('Erro ao ler arquivo: ' + err.message);
+        } finally {
+          this.isImporting.set(false);
+        }
+      }
+
+      showToast(msg) {
+        this.importToast.set(msg);
+        setTimeout(() => {
+          if (this.importToast() === msg) this.importToast.set('');
+        }, 4000);
+      }
+
+      // --- CONTROLES DE PALCO ---
+      selectSong(songId) {
+        this.stopAutoScroll();
+        this.activeSongId.set(songId);
+        const container = document.getElementById('cifra-scroll-container');
+        if (container) container.scrollTop = 0;
+      }
+
+      async toggleStageMode() {
+        const next = !this.stageMode();
+        this.stageMode.set(next);
+        if (next) {
+          await this.enableWakeLock();
+          if (document.documentElement.requestFullscreen && !document.fullscreenElement) {
+            document.documentElement.requestFullscreen().catch(() => {});
+          }
+        } else {
+          await this.disableWakeLock();
+          if (document.fullscreenElement) {
+            document.exitFullscreen().catch(() => {});
+          }
+        }
+      }
+
+      async enableWakeLock() {
+        try {
+          if ('wakeLock' in navigator) {
+            this.wakeLockSentinel = await navigator.wakeLock.request('screen');
+            this.wakeLockActive.set(true);
+            this.wakeLockSentinel.addEventListener('release', () => this.wakeLockActive.set(false));
+          }
+        } catch {
+          this.wakeLockActive.set(false);
+        }
+      }
+
+      async disableWakeLock() {
+        if (this.wakeLockSentinel) {
+          await this.wakeLockSentinel.release().catch(() => {});
+          this.wakeLockSentinel = null;
+          this.wakeLockActive.set(false);
+        }
+      }
+
+      toggleAutoScroll() {
+        this.isScrolling() ? this.stopAutoScroll() : this.startAutoScroll();
+      }
+
+      startAutoScroll() {
+        this.isScrolling.set(true);
+        this.scrollAccumulator = 0;
+        let lastTime = performance.now();
+
+        const step = (now) => {
+          if (!this.isScrolling()) return;
+          const dt = (now - lastTime) / 1000;
+          lastTime = now;
+
+          const container = document.getElementById('cifra-scroll-container');
+          if (container) {
+            const pxPerSecond = this.scrollSpeed() * 14;
+            this.scrollAccumulator += pxPerSecond * dt;
+
+            if (this.scrollAccumulator >= 1) {
+              const wholePixels = Math.floor(this.scrollAccumulator);
+              container.scrollTop += wholePixels;
+              this.scrollAccumulator -= wholePixels;
+            }
+
+            if (container.scrollTop + container.clientHeight >= container.scrollHeight - 2) {
+              this.stopAutoScroll();
+              return;
+            }
+          }
+          this.scrollRafId = requestAnimationFrame(step);
+        };
+        this.scrollRafId = requestAnimationFrame(step);
+      }
+
+      stopAutoScroll() {
+        this.isScrolling.set(false);
+        if (this.scrollRafId) {
+          cancelAnimationFrame(this.scrollRafId);
+          this.scrollRafId = null;
+        }
+      }
+
+      changeFontSize(delta) {
+        this.fontSize.update(size => Math.min(32, Math.max(12, size + delta)));
+      }
+
+      changeTranspose(delta) {
+        const current = this.activeSong();
+        if (!current) return;
+        const nextSteps = ((current.transpose || 0) + delta) % 12;
+        this.songs.update(list =>
+          list.map(s => s.id === current.id ? { ...s, transpose: nextSteps } : s)
+        );
+      }
+
+      resetTranspose() {
+        const current = this.activeSong();
+        if (!current) return;
+        this.songs.update(list =>
+          list.map(s => s.id === current.id ? { ...s, transpose: 0 } : s)
+        );
+      }
+
+      getDisplayKey(song) {
+        const preferFlat = song.originalKey.includes('b');
+        return transposeSingleChord(song.originalKey, song.transpose || 0, preferFlat);
+      }
+
+      // --- EDITOR ---
+      openNewSongEditor() {
+        this.editingSongId.set(null);
+        this.formTitle.set('');
+        this.formArtist.set('');
+        this.formGenre.set(this.selectedGenre() || 'MPB');
+        this.formContent.set('');
+        this.editorOpen.set(true);
+      }
+
+      openEditSongEditor(song) {
+        this.editingSongId.set(song.id);
+        this.formTitle.set(song.title);
+        this.formArtist.set(song.artist);
+        this.formGenre.set(song.genre);
+        this.formContent.set(song.rawContent);
+        this.editorOpen.set(true);
+      }
+
+      saveSongForm() {
+        const title = this.formTitle().trim() || 'Sem Título';
+        const artist = this.formArtist().trim() || 'Artista Desconhecido';
+        const genre = this.formGenre().trim() || 'Geral';
+        const rawContent = this.formContent();
+        const detectedKey = detectOriginalKey(rawContent);
+
+        const editId = this.editingSongId();
+        if (editId) {
+          this.songs.update(list => list.map(s =>
+            s.id === editId ? { ...s, title, artist, genre, rawContent, originalKey: detectedKey } : s
+          ));
+        } else {
+          const newId = 'song-' + Date.now();
+          const newSong = {
+            id: newId,
+            title,
+            artist,
+            genre,
+            originalKey: detectedKey,
+            transpose: 0,
+            rawContent
+          };
+          this.songs.update(list => [newSong, ...list]);
+          this.activeSongId.set(newId);
+        }
+        this.editorOpen.set(false);
+      }
+
+      deleteSong(songId) {
+        if (!confirm('Deseja realmente excluir esta cifra?')) return;
+        this.songs.update(list => list.filter(s => s.id !== songId));
+        this.setlists.update(sets => sets.map(set => ({
+          ...set,
+          songIds: set.songIds.filter(id => id !== songId)
+        })));
+        if (this.activeSongId() === songId) {
+          this.activeSongId.set(this.songs()[0]?.id || '');
+        }
+        this.editorOpen.set(false);
+      }
+
+      // --- SETLISTS ---
+      createSetlist() {
+        const name = this.newSetlistName().trim();
+        if (!name) return;
+        const newId = 'set-' + Date.now();
+        this.setlists.update(list => [...list, { id: newId, name, songIds: [] }]);
+        this.activeSetlistId.set(newId);
+        this.newSetlistName.set('');
+      }
+
+      deleteCurrentSetlist() {
+        const current = this.currentSetlist();
+        if (!current) return;
+        if (!confirm(`Excluir o setlist "${current.name}"?`)) return;
+        this.setlists.update(list => list.filter(s => s.id !== current.id));
+        this.activeSetlistId.set(this.setlists()[0]?.id || '');
+      }
+
+      toggleSongInSetlist(songId) {
+        const setId = this.activeSetlistId();
+        if (!setId) return;
+        this.setlists.update(list => list.map(set => {
+          if (set.id !== setId) return set;
+          const exists = set.songIds.includes(songId);
+          return {
+            ...set,
+            songIds: exists ? set.songIds.filter(id => id !== songId) : [...set.songIds, songId]
+          };
+        }));
+      }
+
+      moveSongInSetlist(index, direction) {
+        const setId = this.activeSetlistId();
+        this.setlists.update(list => list.map(set => {
+          if (set.id !== setId) return set;
+          const ids = [...set.songIds];
+          const targetIdx = index + direction;
+          if (targetIdx < 0 || targetIdx >= ids.length) return set;
+          [ids[index], ids[targetIdx]] = [ids[targetIdx], ids[index]];
+          return { ...set, songIds: ids };
+        }));
+      }
+
+      onGenreChange(newGenre) {
+        this.selectedGenre.set(newGenre);
+        if (newGenre && this.selectedArtist()) {
+          const stillValid = this.songs().some(
+            s => s.genre === newGenre && s.artist === this.selectedArtist()
+          );
+          if (!stillValid) this.selectedArtist.set('');
+        }
+      }
+
+      loadStorage(key, fallback) {
+        try {
+          const saved = localStorage.getItem(key);
+          return saved ? JSON.parse(saved) : fallback;
+        } catch {
+          return fallback;
+        }
+      }
+    }
+
+    // =========================================================================
+    // 5. TEMPLATE
+    // =========================================================================
+    Component({
+      selector: 'app-root',
+      standalone: true,
+      template: `
+        <div
+          (dragover)="onDragOver($event)"
+          (dragleave)="onDragLeave($event)"
+          (drop)="onDropFiles($event)"
+          class="flex h-full w-full bg-zinc-950 text-zinc-100 relative">
+
+          <!-- OVERLAY VISUAL DE DRAG & DROP -->
+          @if (isDragging()) {
+            <div class="fixed inset-0 bg-amber-500/20 border-4 border-dashed border-amber-400 z-50 flex items-center justify-center pointer-events-none backdrop-blur-xs">
+              <div class="bg-zinc-900 px-8 py-6 rounded-2xl border border-amber-400 text-center shadow-2xl">
+                <div class="text-4xl mb-2">📥</div>
+                <div class="text-lg font-bold text-amber-400">Solte seus arquivos .PDF ou .TXT aqui</div>
+                <div class="text-xs text-zinc-400 mt-1">O alinhamento dos acordes será preservado automaticamente</div>
+              </div>
+            </div>
+          }
+
+          <!-- NOTIFICAÇÃO FLUTUANTE (TOAST) -->
+          @if (importToast()) {
+            <div class="fixed bottom-5 right-5 z-50 bg-zinc-900 border border-amber-500/50 text-amber-300 px-4 py-3 rounded-xl shadow-2xl text-sm font-medium">
+              {{ importToast() }}
+            </div>
+          }
+
+          <!-- BARRA LATERAL -->
+          @if (!stageMode()) {
+            <aside class="w-80 border-r border-zinc-800 bg-zinc-900/95 flex flex-col h-full shrink-0">
+              <div class="p-3 border-b border-zinc-800 flex items-center justify-between gap-1.5">
+                <span class="font-bold text-base tracking-tight text-amber-400">🎸 CifraStage</span>
+                <div class="flex items-center gap-1.5">
+                  <!-- Botão Importar PDF/TXT em Lote -->
+                  <label class="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs cursor-pointer transition">
+                    {{ isImporting() ? '⏳...' : '📥 PDF/TXT' }}
+                    <input
+                      type="file"
+                      accept=".pdf,.txt"
+                      multiple
+                      (change)="onFileInputChange($event, false)"
+                      class="hidden"
+                    />
+                  </label>
+                  <button
+                    (click)="openNewSongEditor()"
+                    class="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-xs transition">
+                    + Nova
+                  </button>
+                </div>
+              </div>
+
+              <!-- Abas -->
+              <div class="grid grid-cols-2 p-2 gap-1 bg-zinc-950/60 border-b border-zinc-800">
+                <button
+                  (click)="navMode.set('library')"
+                  [class]="navMode() === 'library'
+                    ? 'bg-amber-500 text-zinc-950 font-semibold'
+                    : 'text-zinc-400 hover:bg-zinc-800'"
+                  class="py-1.5 rounded-lg text-sm transition">
+                  📚 Repertório ({{ songs().length }})
+                </button>
+                <button
+                  (click)="navMode.set('setlist')"
+                  [class]="navMode() === 'setlist'
+                    ? 'bg-amber-500 text-zinc-950 font-semibold'
+                    : 'text-zinc-400 hover:bg-zinc-800'"
+                  class="py-1.5 rounded-lg text-sm transition">
+                  📋 Setlists ({{ setlists().length }})
+                </button>
+              </div>
+
+              @if (navMode() === 'library') {
+                <div class="p-3 space-y-2 border-b border-zinc-800 bg-zinc-900">
+                  <input
+                    type="text"
+                    [value]="searchQuery()"
+                    (input)="searchQuery.set($any($event.target).value)"
+                    placeholder="🔍 Buscar título ou artista..."
+                    class="w-full px-3 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-sm focus:outline-none focus:border-amber-500"
+                  />
+
+                  <div class="grid grid-cols-2 gap-2">
+                    <select
+                      [value]="selectedGenre()"
+                      (change)="onGenreChange($any($event.target).value)"
+                      class="px-2 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-300">
+                      <option value="">Todos Gêneros</option>
+                      @for (genre of availableGenres(); track genre) {
+                        <option [value]="genre">{{ genre }}</option>
+                      }
+                    </select>
+
+                    <select
+                      [value]="selectedArtist()"
+                      (change)="selectedArtist.set($any($event.target).value)"
+                      class="px-2 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-300">
+                      <option value="">Todos Artistas</option>
+                      @for (artist of availableArtists(); track artist) {
+                        <option [value]="artist">{{ artist }}</option>
+                      }
+                    </select>
+                  </div>
+                </div>
+              } @else {
+                <div class="p-3 border-b border-zinc-800">
+                  <div class="flex gap-1.5">
+                    <select
+                      [value]="activeSetlistId()"
+                      (change)="activeSetlistId.set($any($event.target).value)"
+                      class="flex-1 px-2.5 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-sm">
+                      @for (set of setlists(); track set.id) {
+                        <option [value]="set.id">{{ set.name }} ({{ set.songIds.length }})</option>
+                      }
+                    </select>
+                    <button
+                      (click)="setlistModalOpen.set(true)"
+                      class="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-amber-400">
+                      ⚙️ Gerir
+                    </button>
+                  </div>
+                </div>
+              }
+
+              <div class="flex-1 overflow-y-auto p-2 space-y-1">
+                @for (song of displayedSongs(); track song.id; let idx = $index) {
+                  <div
+                    (click)="selectSong(song.id)"
+                    [class]="activeSongId() === song.id
+                      ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
+                      : 'border-transparent hover:bg-zinc-800/70 text-zinc-200'"
+                    class="w-full text-left p-2.5 rounded-xl border transition flex items-center justify-between cursor-pointer">
+                    <div class="min-w-0 pr-2 flex-1">
+                      <div class="font-semibold text-sm truncate">
+                        @if (navMode() === 'setlist') {
+                          <span class="text-zinc-500 mr-1">{{ idx + 1 }}.</span>
+                        }
+                        {{ song.title }}
+                      </div>
+                      <div class="text-xs text-zinc-400 truncate">
+                        {{ song.artist }} • <span class="text-zinc-500">{{ song.genre }}</span>
+                      </div>
+                    </div>
+
+                    <div class="flex items-center gap-1 shrink-0">
+                      @if (navMode() === 'setlist') {
+                        <button
+                          (click)="$event.stopPropagation(); moveSongInSetlist(idx, -1)"
+                          class="p-1 text-zinc-500 hover:text-white text-xs">▲</button>
+                        <button
+                          (click)="$event.stopPropagation(); moveSongInSetlist(idx, 1)"
+                          class="p-1 text-zinc-500 hover:text-white text-xs">▼</button>
+                      }
+                      <span class="text-xs font-mono px-2 py-0.5 rounded bg-zinc-950 text-amber-400 border border-zinc-800">
+                        {{ getDisplayKey(song) }}
+                      </span>
+                    </div>
+                  </div>
+                } @empty {
+                  <div class="text-center text-zinc-500 text-sm py-8 px-4">
+                    Arraste arquivos <strong>.PDF</strong> ou <strong>.TXT</strong> para cá ou clique em <strong>📥 PDF/TXT</strong>.
+                  </div>
+                }
+              </div>
+            </aside>
+          }
+
+          <!-- ÁREA PRINCIPAL DO PALCO -->
+          <main class="flex-1 flex flex-col h-full overflow-hidden">
+            @if (activeSong(); as song) {
+              <header class="px-4 py-2.5 border-b border-zinc-800 flex flex-wrap items-center justify-between gap-3 bg-zinc-900/70">
+                <div class="flex items-center gap-3 min-w-0">
+                  <button
+                    (click)="toggleStageMode()"
+                    [class]="stageMode() ? 'bg-amber-500 text-zinc-950 font-bold' : 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700'"
+                    class="px-3 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 shrink-0">
+                    <span>{{ stageMode() ? '✕ Sair Palco' : '⛶ Palco' }}</span>
+                    @if (wakeLockActive()) {
+                      <span class="w-2 h-2 rounded-full bg-emerald-500" title="Tela mantida ativa"></span>
+                    }
+                  </button>
+
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-2">
+                      <h1 class="text-lg font-bold text-white truncate">{{ song.title }}</h1>
+                      @if (!stageMode()) {
+                        <button
+                          (click)="openEditSongEditor(song)"
+                          class="text-xs px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300">
+                          ✏️ Editar
+                        </button>
+                      }
+                    </div>
+                    <p class="text-xs text-zinc-400 truncate">{{ song.artist }} • {{ song.genre }}</p>
+                  </div>
+                </div>
+
+                <div class="flex items-center gap-2 flex-wrap">
+                  <!-- Fonte -->
+                  <div class="flex items-center bg-zinc-950 rounded-xl border border-zinc-800 p-1">
+                    <button (click)="changeFontSize(-2)" class="px-2.5 py-1 text-xs font-bold hover:bg-zinc-800 rounded-lg">A-</button>
+                    <span class="px-2 text-xs font-mono text-zinc-400">{{ fontSize() }}px</span>
+                    <button (click)="changeFontSize(2)" class="px-2.5 py-1 text-xs font-bold hover:bg-zinc-800 rounded-lg">A+</button>
+                  </div>
+
+                  <!-- Auto-Scroll -->
+                  <div class="flex items-center bg-zinc-950 rounded-xl border border-zinc-800 p-1 gap-1">
+                    <button
+                      (click)="toggleAutoScroll()"
+                      [class]="isScrolling() ? 'bg-emerald-500 text-zinc-950 font-bold' : 'bg-zinc-800 text-zinc-200'"
+                      class="px-3 py-1 rounded-lg text-xs font-semibold transition">
+                      {{ isScrolling() ? '⏸ Pausar' : '▶ Rolar' }}
+                    </button>
+                    <select
+                      [value]="scrollSpeed()"
+                      (change)="scrollSpeed.set(+$any($event.target).value)"
+                      class="bg-zinc-900 text-xs text-amber-400 font-mono px-2 py-1 rounded-lg border border-zinc-800">
+                      @for (spd of [1,2,3,4,5,6,7,8,9,10]; track spd) {
+                        <option [value]="spd">{{ spd }}x</option>
+                      }
+                    </select>
+                  </div>
+
+                  <!-- Transposição -->
+                  <div class="flex items-center gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800">
+                    <button (click)="changeTranspose(-1)" class="px-3 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 font-bold text-sm">-½</button>
+                    <button (click)="resetTranspose()" class="px-2.5 py-0.5 text-center min-w-[64px]">
+                      <div class="text-[9px] uppercase text-zinc-500">
+                        {{ song.transpose !== 0 ? (song.transpose > 0 ? '+' + song.transpose : song.transpose) : 'Tom' }}
+                      </div>
+                      <div class="font-mono font-bold text-sm text-amber-400 leading-tight">{{ currentSongKey() }}</div>
+                    </button>
+                    <button (click)="changeTranspose(1)" class="px-3 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 font-bold text-sm">+½</button>
+                  </div>
+                </div>
+              </header>
+
+              <!-- LEITOR DE CIFRA -->
+              <div
+                id="cifra-scroll-container"
+                class="flex-1 overflow-y-auto p-6 md:px-10 bg-zinc-950">
+                <div
+                  [style.fontSize.px]="fontSize()"
+                  class="font-cifra leading-relaxed whitespace-pre pb-48">
+                  @for (line of renderedLines(); track line.id) {
+                    <div class="min-h-[1.5em]">
+                      @for (seg of line.segments; track $index) {
+                        @if (seg.type === 'chord') {
+                          <span class="text-amber-400 font-bold">{{ seg.text }}</span>
+                        } @else if (seg.type === 'tag') {
+                          <span class="text-sky-400 font-semibold">{{ seg.text }}</span>
+                        } @else {
+                          <span class="text-zinc-100">{{ seg.text }}</span>
+                        }
+                      }
+                    </div>
+                  }
+                </div>
+              </div>
+            } @else {
+              <div class="flex-1 flex flex-col items-center justify-center text-zinc-500 gap-3">
+                <p>Nenhuma música selecionada.</p>
+                <button (click)="openNewSongEditor()" class="px-4 py-2 rounded-xl bg-amber-500 text-zinc-950 font-bold text-sm">
+                  + Criar Primeira Cifra
+                </button>
+              </div>
+            }
+          </main>
+
+          <!-- MODAL EDITOR -->
+          @if (editorOpen()) {
+            <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div class="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
+                <div class="p-4 border-b border-zinc-800 flex items-center justify-between">
+                  <div class="flex items-center gap-3">
+                    <h2 class="font-bold text-lg text-amber-400">
+                      {{ editingSongId() ? '✏️ Editar Cifra' : '➕ Nova Cifra' }}
+                    </h2>
+                    <!-- Botão Importar PDF/TXT dentro do editor -->
+                    <label class="px-3 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-200 cursor-pointer font-semibold">
+                      📥 PDF/TXT
+                      <input
+                        type="file"
+                        accept=".pdf,.txt"
+                        (change)="onFileInputChange($event, true)"
+                        class="hidden"
+                      />
+                    </label>
+                  </div>
+                  <button (click)="editorOpen.set(false)" class="text-zinc-400 hover:text-white px-2">✕</button>
+                </div>
+
+                <div class="p-4 space-y-3 overflow-y-auto flex-1">
+                  <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div>
+                      <label class="text-xs text-zinc-400 block mb-1">Título da Música</label>
+                      <input
+                        type="text"
+                        [value]="formTitle()"
+                        (input)="formTitle.set($any($event.target).value)"
+                        placeholder="Ex: Pais e Filhos"
+                        class="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label class="text-xs text-zinc-400 block mb-1">Artista / Banda</label>
+                      <input
+                        type="text"
+                        list="artists-list"
+                        [value]="formArtist()"
+                        (input)="formArtist.set($any($event.target).value)"
+                        placeholder="Ex: Legião Urbana"
+                        class="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-sm"
+                      />
+                      <datalist id="artists-list">
+                        @for (a of availableArtists(); track a) {
+                          <option [value]="a"></option>
+                        }
+                      </datalist>
+                    </div>
+                    <div>
+                      <label class="text-xs text-zinc-400 block mb-1">Gênero</label>
+                      <input
+                        type="text"
+                        list="genres-list"
+                        [value]="formGenre()"
+                        (input)="formGenre.set($any($event.target).value)"
+                        placeholder="Ex: Rock Nacional"
+                        class="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-sm"
+                      />
+                      <datalist id="genres-list">
+                        @for (g of availableGenres(); track g) {
+                          <option [value]="g"></option>
+                        }
+                      </datalist>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label class="text-xs text-zinc-400 block mb-1">Cifra e Letra</label>
+                    <textarea
+                      rows="14"
+                      [value]="formContent()"
+                      (input)="formContent.set($any($event.target).value)"
+                      placeholder="Cole a cifra aqui ou importe um arquivo .PDF / .TXT..."
+                      class="w-full p-3 rounded-xl bg-zinc-950 border border-zinc-800 font-cifra text-sm leading-relaxed focus:outline-none focus:border-amber-500"
+                    ></textarea>
+                  </div>
+                </div>
+
+                <div class="p-4 border-t border-zinc-800 flex items-center justify-between bg-zinc-950/50">
+                  @if (editingSongId(); as id) {
+                    <button (click)="deleteSong(id)" class="px-4 py-2 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 text-sm font-semibold">
+                      🗑️ Excluir
+                    </button>
+                  } @else {
+                    <div></div>
+                  }
+
+                  <div class="flex gap-2">
+                    <button (click)="editorOpen.set(false)" class="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-300 text-sm">Cancelar</button>
+                    <button (click)="saveSongForm()" class="px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-sm">Salvar Cifra</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          }
+
+          <!-- MODAL SETLISTS -->
+          @if (setlistModalOpen()) {
+            <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div class="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
+                <div class="p-4 border-b border-zinc-800 flex items-center justify-between">
+                  <h2 class="font-bold text-lg text-amber-400">📋 Gerenciar Setlists</h2>
+                  <button (click)="setlistModalOpen.set(false)" class="text-zinc-400 hover:text-white px-2">✕</button>
+                </div>
+
+                <div class="p-4 space-y-4 overflow-y-auto flex-1">
+                  <div class="flex gap-2">
+                    <input
+                      type="text"
+                      [value]="newSetlistName()"
+                      (input)="newSetlistName.set($any($event.target).value)"
+                      placeholder="Nome do novo setlist..."
+                      class="flex-1 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-sm"
+                    />
+                    <button (click)="createSetlist()" class="px-4 py-2 rounded-xl bg-amber-500 text-zinc-950 font-bold text-sm">+ Criar</button>
+                  </div>
+
+                  @if (currentSetlist(); as set) {
+                    <div class="flex items-center justify-between pt-2 border-t border-zinc-800">
+                      <span class="text-sm text-zinc-300">Músicas em: <strong class="text-amber-400">{{ set.name }}</strong></span>
+                      <button (click)="deleteCurrentSetlist()" class="text-xs text-red-400 hover:underline">Excluir setlist</button>
+                    </div>
+
+                    <div class="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                      @for (song of songs(); track song.id) {
+                        <label class="flex items-center justify-between p-2.5 rounded-xl bg-zinc-950 border border-zinc-800 cursor-pointer hover:border-zinc-700">
+                          <div class="flex items-center gap-3">
+                            <input
+                              type="checkbox"
+                              [checked]="set.songIds.includes(song.id)"
+                              (change)="toggleSongInSetlist(song.id)"
+                              class="w-4 h-4 accent-amber-500"
+                            />
+                            <div>
+                              <div class="text-sm font-semibold text-zinc-200">{{ song.title }}</div>
+                              <div class="text-xs text-zinc-500">{{ song.artist }} • {{ song.genre }}</div>
+                            </div>
+                          </div>
+                          <span class="text-xs font-mono text-amber-400">{{ getDisplayKey(song) }}</span>
+                        </label>
+                      }
+                    </div>
+                  }
+                </div>
+
+                <div class="p-4 border-t border-zinc-800 flex justify-end">
+                  <button (click)="setlistModalOpen.set(false)" class="px-5 py-2 rounded-xl bg-amber-500 text-zinc-950 font-bold text-sm">Concluir</button>
+                </div>
+              </div>
+            </div>
+          }
+
+        </div>
+      `
+    })(AppComponent);
+
+    bootstrapApplication(AppComponent, {
+      providers: [provideExperimentalZonelessChangeDetection()]
+    }).catch(err => {
+      console.error('Erro ao iniciar Angular:', err);
+      document.querySelector('app-root').innerHTML =
+        `<div style="padding:2rem;color:#f87171;">Erro: ${err.message}</div>`;
+    });
+  </script>
+</body>
+</html>
