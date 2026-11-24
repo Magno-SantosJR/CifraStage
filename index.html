@@ -4,7 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#09090b" />
-  <title>CifraStage — Leitor de Palco</title>
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>CifraStage — Leitor de Palco Offline</title>
 
   <script src="https://cdn.tailwindcss.com"></script>
 
@@ -44,13 +47,74 @@
     </div>
   </app-root>
 
+  <!-- REGISTRO PWA (Manifest Dinâmico + Service Worker Offline para Tela Inicial) -->
+  <script>
+    (function setupPWA() {
+      const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#09090b"/><text x="50%" y="54%" font-size="280" text-anchor="middle" dominant-baseline="middle">🎸</text></svg>`;
+      const iconUrl = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(iconSvg)));
+
+      const manifest = {
+        name: 'CifraStage — Leitor de Palco',
+        short_name: 'CifraStage',
+        description: 'Leitor offline de cifras e partituras com suporte a pedal M-Vave Cube Turner',
+        start_url: './',
+        display: 'standalone',
+        orientation: 'any',
+        background_color: '#09090b',
+        theme_color: '#09090b',
+        icons: [{ src: iconUrl, sizes: '512x512', type: 'image/svg+xml', purpose: 'any maskable' }]
+      };
+
+      const manifestBlob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
+      const link = document.createElement('link');
+      link.rel = 'manifest';
+      link.href = URL.createObjectURL(manifestBlob);
+      document.head.appendChild(link);
+
+      // Service Worker embutido para cache 100% offline quando hospedado em HTTPS (GitHub Pages/Vercel)
+      if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+        const swCode = `
+          const CACHE_NAME = 'cifrastage-offline-v1';
+          self.addEventListener('install', (e) => {
+            self.skipWaiting();
+          });
+          self.addEventListener('activate', (e) => {
+            e.waitUntil(clients.claim());
+          });
+          self.addEventListener('fetch', (e) => {
+            if (e.request.method !== 'GET') return;
+            e.respondWith(
+              caches.open(CACHE_NAME).then(async (cache) => {
+                const cached = await cache.match(e.request);
+                if (cached) {
+                  fetch(e.request).then(res => { if (res && res.ok) cache.put(e.request, res.clone()); }).catch(() => {});
+                  return cached;
+                }
+                try {
+                  const networkRes = await fetch(e.request);
+                  if (networkRes && (networkRes.ok || networkRes.type === 'opaque')) {
+                    cache.put(e.request, networkRes.clone());
+                  }
+                  return networkRes;
+                } catch {
+                  return cached || new Response('Offline', { status: 503 });
+                }
+              })
+            );
+          });
+        `;
+        const swBlob = new Blob([swCode], { type: 'application/javascript' });
+        navigator.serviceWorker.register(URL.createObjectURL(swBlob)).catch(() => {});
+      }
+    })();
+  </script>
+
   <script type="module">
     import '@angular/compiler';
     import { Component, signal, computed, effect, provideExperimentalZonelessChangeDetection } from '@angular/core';
     import { bootstrapApplication } from '@angular/platform-browser';
     import * as pdfjsLib from 'pdfjs-dist';
 
-    // Configura o Worker do PDF.js para processar PDFs sem travar a interface
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@4.10.38/build/pdf.worker.mjs';
 
     // =========================================================================
@@ -131,7 +195,7 @@
     }
 
     // =========================================================================
-    // 2. EXTRATOR DE PDF COM RECONSTRUÇÃO ESPACIAL (EIXOS X e Y)
+    // 2. EXTRATOR DE PDF COM ALINHAMENTO GEOMÉTRICO (X e Y)
     // =========================================================================
     async function extractAlignedTextFromPdf(arrayBuffer) {
       const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
@@ -142,7 +206,6 @@
         const page = await pdf.getPage(pageNum);
         const textContent = await page.getTextContent();
 
-        // Extrai cada fragmento com suas coordenadas X, Y e largura real
         const items = textContent.items
           .filter(item => item.str && item.str.trim().length > 0)
           .map(item => ({
@@ -155,10 +218,8 @@
 
         if (items.length === 0) continue;
 
-        // 1. Ordena de cima para baixo (no PDF, Y cresce para cima, então b.y - a.y)
         items.sort((a, b) => b.y - a.y);
 
-        // 2. Agrupa itens na mesma linha visual (tolerância vertical de 4.5 unidades)
         const rows = [];
         for (const item of items) {
           const existingRow = rows.find(r => Math.abs(r.y - item.y) <= 4.5);
@@ -169,14 +230,11 @@
           }
         }
 
-        // Calcula largura média de 1 caractere na página para converter distância X em espaços
         const avgCharWidth = items.reduce((acc, it) => acc + it.charWidth, 0) / items.length || 6;
         const minX = Math.min(...items.map(it => it.x));
 
-        // 3. Para cada linha, ordena da esquerda para direita (eixo X) e insere espaços proporcionais
         let previousY = null;
         for (const row of rows) {
-          // Se houver um salto vertical grande entre linhas, preserva uma linha em branco
           if (previousY !== null && (previousY - row.y) > 22) {
             allPagesLines.push('');
           }
@@ -200,7 +258,7 @@
         }
 
         if (pageNum < pdf.numPages) {
-          allPagesLines.push(''); // Separação entre páginas
+          allPagesLines.push('');
         }
       }
 
@@ -220,8 +278,20 @@
     }
 
     // =========================================================================
-    // 3. DADOS INICIAIS
+    // 3. DADOS E CONFIGURAÇÕES PADRÃO (INCLUINDO PEDAL M-VAVE CUBE TURNER)
     // =========================================================================
+    const DEFAULT_PEDAL_CONFIG = {
+      mode: 'smart',         // 'smart' | 'scroll' | 'song'
+      scrollPercent: 45,     // 25 | 45 | 75 (% da altura visível)
+      smoothScroll: true,    // true = suave | false = instantânea
+      bindings: {
+        scrollUp:   ['PageUp', 'ArrowUp'],
+        scrollDown: ['PageDown', 'ArrowDown'],
+        prevSong:   ['ArrowLeft'],
+        nextSong:   ['ArrowRight']
+      }
+    };
+
     const DEMO_SONGS = [
       {
         id: 'song-1',
@@ -230,7 +300,7 @@
         genre: 'Rock Nacional',
         originalKey: 'C',
         transpose: 0,
-        rawContent: `[Intro] C  Am7  Bm  Em\n\nC               Am7\nTodos os dias quando acordo\nBm                   Em\nNão tenho mais o tempo que passou\nC              Am7\nMas tenho muito tempo\nBm             Em\nTemos todo o tempo do mundo`
+        rawContent: `[Intro] C  Am7  Bm  Em\n\nC               Am7\nTodos os dias quando acordo\nBm                   Em\nNão tenho mais o tempo que passou\nC              Am7\nMas tenho muito tempo\nBm             Em\nTemos todo o tempo do mundo\n\nC               Am7\nTodos os dias antes de dormir\nBm                   Em\nLembro e esqueço como foi o dia\nC               Am7\nSempre em frente\nBm             Em\nNão temos tempo a perder`
       },
       {
         id: 'song-2',
@@ -252,10 +322,13 @@
     // =========================================================================
     class AppComponent {
       constructor() {
+        // Estado persistido no localStorage (memória interna do dispositivo)
         this.songs = signal(this.loadStorage('cifrastage_songs', DEMO_SONGS));
         this.setlists = signal(this.loadStorage('cifrastage_setlists', DEMO_SETLISTS));
         this.fontSize = signal(this.loadStorage('cifrastage_fontsize', 18));
+        this.pedalConfig = signal(this.loadStorage('cifrastage_pedal', DEFAULT_PEDAL_CONFIG));
 
+        // Navegação e filtros
         this.navMode = signal('library');
         this.activeSetlistId = signal(this.setlists()[0]?.id || '');
         this.activeSongId = signal(this.songs()[0]?.id || '');
@@ -263,19 +336,21 @@
         this.selectedGenre = signal('');
         this.selectedArtist = signal('');
 
+        // Modo Palco e Wake Lock
         this.stageMode = signal(false);
         this.wakeLockActive = signal(false);
         this.wakeLockSentinel = null;
 
+        // Auto-Scroll
         this.isScrolling = signal(false);
         this.scrollSpeed = signal(2);
         this.scrollAccumulator = 0;
         this.scrollRafId = null;
 
-        // Importação e Drag & Drop
+        // Importação e Feedback Visual
         this.isDragging = signal(false);
         this.isImporting = signal(false);
-        this.importToast = signal('');
+        this.toastMessage = signal('');
 
         // Modais
         this.editorOpen = signal(false);
@@ -287,6 +362,12 @@
 
         this.setlistModalOpen = signal(false);
         this.newSetlistName = signal('');
+
+        this.pedalModalOpen = signal(false);
+        this.learningAction = signal(null); // 'scrollUp' | 'scrollDown' | 'prevSong' | 'nextSong' | null
+        this.lastKeyPressed = signal('');
+
+        this.backupModalOpen = signal(false);
 
         // --- COMPUTEDS ---
         this.availableGenres = computed(() => {
@@ -372,12 +453,231 @@
           });
         });
 
+        // Effects de salvamento automático
         effect(() => localStorage.setItem('cifrastage_songs', JSON.stringify(this.songs())));
         effect(() => localStorage.setItem('cifrastage_setlists', JSON.stringify(this.setlists())));
         effect(() => localStorage.setItem('cifrastage_fontsize', JSON.stringify(this.fontSize())));
+        effect(() => localStorage.setItem('cifrastage_pedal', JSON.stringify(this.pedalConfig())));
+
+        // Ouvinte global do Pedal Bluetooth M-Vave Cube Turner
+        window.addEventListener('keydown', (e) => this.handleGlobalKeydown(e), { passive: false });
       }
 
-      // --- IMPORTAÇÃO EM LOTE E DRAG & DROP (.PDF e .TXT) ---
+      // =======================================================================
+      // INTEGRAÇÃO PEDAL M-VAVE CUBE TURNER (3 MODOS + MODO APRENDIZADO)
+      // =======================================================================
+      handleGlobalKeydown(event) {
+        const keyCode = event.code || event.key;
+        this.lastKeyPressed.set(keyCode);
+
+        // 1. Se está no Modo Aprendizado (Calibragem Individual)
+        const learning = this.learningAction();
+        if (learning) {
+          event.preventDefault();
+          event.stopPropagation();
+          this.assignPedalKey(learning, keyCode);
+          this.learningAction.set(null);
+          this.showToast(`Tecla "${keyCode}" gravada com sucesso!`);
+          return;
+        }
+
+        // Ignora atalhos se o usuário estiver digitando dentro de um input ou textarea
+        const tag = event.target?.tagName?.toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+        if (this.editorOpen() || this.setlistModalOpen() || this.pedalModalOpen() || this.backupModalOpen()) return;
+
+        const cfg = this.pedalConfig();
+        const b = cfg.bindings;
+
+        const isUp = b.scrollUp.includes(keyCode);
+        const isDown = b.scrollDown.includes(keyCode);
+        const isPrev = b.prevSong.includes(keyCode);
+        const isNext = b.nextSong.includes(keyCode);
+
+        if (!isUp && !isDown && !isPrev && !isNext) return;
+
+        event.preventDefault();
+
+        // Ações diretas de música anterior / próxima
+        if (isPrev) {
+          this.navigateSong(-1);
+          return;
+        }
+        if (isNext) {
+          this.navigateSong(1);
+          return;
+        }
+
+        // Ações nos pedais principais (Cima / Baixo) conforme o modo ativo
+        if (cfg.mode === 'song') {
+          this.navigateSong(isDown ? 1 : -1);
+          return;
+        }
+
+        if (cfg.mode === 'scroll') {
+          this.stepScroll(isDown ? 1 : -1);
+          return;
+        }
+
+        // Modo 'smart' (Inteligente): rola e, ao atingir o topo/fim, troca de música
+        if (cfg.mode === 'smart') {
+          const container = document.getElementById('cifra-scroll-container');
+          if (!container) return;
+
+          if (isDown) {
+            const atBottom = (container.scrollTop + container.clientHeight) >= (container.scrollHeight - 10);
+            if (atBottom) {
+              this.navigateSong(1);
+            } else {
+              this.stepScroll(1);
+            }
+          } else if (isUp) {
+            const atTop = container.scrollTop <= 10;
+            if (atTop) {
+              this.navigateSong(-1);
+            } else {
+              this.stepScroll(-1);
+            }
+          }
+        }
+      }
+
+      stepScroll(direction) {
+        const container = document.getElementById('cifra-scroll-container');
+        if (!container) return;
+        const cfg = this.pedalConfig();
+        const distance = Math.round(container.clientHeight * (cfg.scrollPercent / 100)) * direction;
+
+        container.scrollBy({
+          top: distance,
+          behavior: cfg.smoothScroll ? 'smooth' : 'auto'
+        });
+      }
+
+      navigateSong(delta) {
+        const list = this.displayedSongs();
+        if (list.length === 0) return;
+
+        const currentIndex = list.findIndex(s => s.id === this.activeSongId());
+        if (currentIndex === -1) {
+          this.selectSong(list[0].id);
+          return;
+        }
+
+        const nextIndex = currentIndex + delta;
+        if (nextIndex >= 0 && nextIndex < list.length) {
+          const nextSong = list[nextIndex];
+          this.selectSong(nextSong.id);
+          this.showToast(`🎵 ${nextIndex + 1}/${list.length}: ${nextSong.title}`);
+        } else {
+          this.showToast(delta > 0 ? 'Fim da lista de músicas' : 'Início da lista de músicas');
+        }
+      }
+
+      cyclePedalMode() {
+        const order = ['smart', 'scroll', 'song'];
+        const current = this.pedalConfig().mode;
+        const next = order[(order.indexOf(current) + 1) % order.length];
+        this.updatePedalConfig({ mode: next });
+      }
+
+      updatePedalConfig(partial) {
+        this.pedalConfig.update(cfg => ({ ...cfg, ...partial }));
+      }
+
+      assignPedalKey(action, keyCode) {
+        this.pedalConfig.update(cfg => {
+          // Remove a tecla de outras ações para evitar conflito e define na ação escolhida
+          const cleanedBindings = {};
+          for (const k of Object.keys(cfg.bindings)) {
+            cleanedBindings[k] = cfg.bindings[k].filter(code => code !== keyCode);
+          }
+          cleanedBindings[action] = [keyCode];
+          return { ...cfg, bindings: cleanedBindings };
+        });
+      }
+
+      resetPedalDefaults() {
+        this.pedalConfig.set(JSON.parse(JSON.stringify(DEFAULT_PEDAL_CONFIG)));
+        this.learningAction.set(null);
+        this.showToast('Configurações padrão do M-Vave restauradas!');
+      }
+
+      // =======================================================================
+      // BACKUP E RESTAURAÇÃO EM ARQUIVO .JSON (MEMÓRIA INTERNA / MICROSD)
+      // =======================================================================
+      async exportBackupJson() {
+        const payload = {
+          app: 'CifraStage',
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          songs: this.songs(),
+          setlists: this.setlists(),
+          pedalConfig: this.pedalConfig(),
+          fontSize: this.fontSize()
+        };
+
+        const jsonStr = JSON.stringify(payload, null, 2);
+        const filename = `cifrastage-backup-${new Date().toISOString().slice(0, 10)}.json`;
+
+        // Tenta abrir o seletor nativo do Android/PC (permite escolher pasta do microSD diretamente)
+        if ('showSaveFilePicker' in window) {
+          try {
+            const handle = await window.showSaveFilePicker({
+              suggestedName: filename,
+              types: [{ description: 'Backup CifraStage JSON', accept: { 'application/json': ['.json'] } }]
+            });
+            const writable = await handle.createWritable();
+            await writable.write(jsonStr);
+            await writable.close();
+            this.showToast('Backup salvo na pasta escolhida!');
+            return;
+          } catch (err) {
+            if (err.name === 'AbortError') return; // Usuário cancelou
+          }
+        }
+
+        // Fallback universal de download (vai para Downloads ou pasta configurada no navegador)
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+        this.showToast('Arquivo de backup .JSON baixado!');
+      }
+
+      async importBackupJson(event) {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file) return;
+
+        try {
+          const text = await file.text();
+          const data = JSON.parse(text);
+
+          if (!Array.isArray(data.songs)) {
+            throw new Error('Arquivo JSON inválido ou incompatível.');
+          }
+
+          this.songs.set(data.songs);
+          if (Array.isArray(data.setlists)) this.setlists.set(data.setlists);
+          if (data.pedalConfig) this.pedalConfig.set({ ...DEFAULT_PEDAL_CONFIG, ...data.pedalConfig });
+          if (typeof data.fontSize === 'number') this.fontSize.set(data.fontSize);
+
+          this.activeSongId.set(data.songs[0]?.id || '');
+          this.activeSetlistId.set(data.setlists?.[0]?.id || '');
+          this.backupModalOpen.set(false);
+          this.showToast(`Backup restaurado! ${data.songs.length} músicas carregadas.`);
+        } catch (err) {
+          this.showToast('Erro ao restaurar backup: ' + err.message);
+        }
+      }
+
+      // =======================================================================
+      // IMPORTAÇÃO DE CIFRAS (.PDF e .TXT) + DRAG & DROP
+      // =======================================================================
       onDragOver(event) {
         event.preventDefault();
         event.stopPropagation();
@@ -404,7 +704,7 @@
 
       async onFileInputChange(event, intoEditor = false) {
         const files = Array.from(event.target.files || []);
-        event.target.value = ''; // Permite reimportar o mesmo arquivo se desejar
+        event.target.value = '';
         if (files.length > 0) {
           await this.processImportedFiles(files, intoEditor);
         }
@@ -430,7 +730,6 @@
               rawContent = await file.text();
             }
 
-            // Normaliza quebras de linha Windows/Mac
             rawContent = rawContent.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
             const meta = parseMetadataFromFilename(file.name);
             const detectedKey = detectOriginalKey(rawContent);
@@ -446,7 +745,6 @@
             });
           }
 
-          // Se importou 1 arquivo de dentro do editor aberto, preenche os campos do editor
           if (intoEditor && importedSongs.length === 1) {
             const first = importedSongs[0];
             if (!this.formTitle().trim()) this.formTitle.set(first.title);
@@ -454,16 +752,14 @@
             this.formContent.set(first.rawContent);
             this.showToast('Conteúdo carregado no editor!');
           } else {
-            // Salva todas diretamente no repertório offline
             this.songs.update(list => [...importedSongs, ...list]);
             this.activeSongId.set(importedSongs[0].id);
             this.navMode.set('library');
             this.selectedGenre.set('');
             this.selectedArtist.set('');
-            this.showToast(`${importedSongs.length} cifra(s) importada(s) com sucesso!`);
+            this.showToast(`${importedSongs.length} cifra(s) importada(s)!`);
           }
         } catch (err) {
-          console.error('Erro na importação:', err);
           this.showToast('Erro ao ler arquivo: ' + err.message);
         } finally {
           this.isImporting.set(false);
@@ -471,13 +767,15 @@
       }
 
       showToast(msg) {
-        this.importToast.set(msg);
+        this.toastMessage.set(msg);
         setTimeout(() => {
-          if (this.importToast() === msg) this.importToast.set('');
-        }, 4000);
+          if (this.toastMessage() === msg) this.toastMessage.set('');
+        }, 3800);
       }
 
-      // --- CONTROLES DE PALCO ---
+      // =======================================================================
+      // CONTROLES DE PALCO, FONTE, TRANSPOSIÇÃO, EDITOR E SETLISTS
+      // =======================================================================
       selectSong(songId) {
         this.stopAutoScroll();
         this.activeSongId.set(songId);
@@ -590,7 +888,6 @@
         return transposeSingleChord(song.originalKey, song.transpose || 0, preferFlat);
       }
 
-      // --- EDITOR ---
       openNewSongEditor() {
         this.editingSongId.set(null);
         this.formTitle.set('');
@@ -651,7 +948,6 @@
         this.editorOpen.set(false);
       }
 
-      // --- SETLISTS ---
       createSetlist() {
         const name = this.newSetlistName().trim();
         if (!name) return;
@@ -715,7 +1011,7 @@
     }
 
     // =========================================================================
-    // 5. TEMPLATE
+    // 5. TEMPLATE FINAL
     // =========================================================================
     Component({
       selector: 'app-root',
@@ -727,21 +1023,21 @@
           (drop)="onDropFiles($event)"
           class="flex h-full w-full bg-zinc-950 text-zinc-100 relative">
 
-          <!-- OVERLAY VISUAL DE DRAG & DROP -->
+          <!-- OVERLAY DRAG & DROP -->
           @if (isDragging()) {
             <div class="fixed inset-0 bg-amber-500/20 border-4 border-dashed border-amber-400 z-50 flex items-center justify-center pointer-events-none backdrop-blur-xs">
               <div class="bg-zinc-900 px-8 py-6 rounded-2xl border border-amber-400 text-center shadow-2xl">
                 <div class="text-4xl mb-2">📥</div>
                 <div class="text-lg font-bold text-amber-400">Solte seus arquivos .PDF ou .TXT aqui</div>
-                <div class="text-xs text-zinc-400 mt-1">O alinhamento dos acordes será preservado automaticamente</div>
+                <div class="text-xs text-zinc-400 mt-1">Alinhamento horizontal e detecção de tom automáticos</div>
               </div>
             </div>
           }
 
-          <!-- NOTIFICAÇÃO FLUTUANTE (TOAST) -->
-          @if (importToast()) {
-            <div class="fixed bottom-5 right-5 z-50 bg-zinc-900 border border-amber-500/50 text-amber-300 px-4 py-3 rounded-xl shadow-2xl text-sm font-medium">
-              {{ importToast() }}
+          <!-- TOAST DE NOTIFICAÇÃO -->
+          @if (toastMessage()) {
+            <div class="fixed bottom-5 right-5 z-50 bg-zinc-900 border border-amber-500/60 text-amber-300 px-4 py-3 rounded-xl shadow-2xl text-sm font-medium">
+              {{ toastMessage() }}
             </div>
           }
 
@@ -751,16 +1047,9 @@
               <div class="p-3 border-b border-zinc-800 flex items-center justify-between gap-1.5">
                 <span class="font-bold text-base tracking-tight text-amber-400">🎸 CifraStage</span>
                 <div class="flex items-center gap-1.5">
-                  <!-- Botão Importar PDF/TXT em Lote -->
                   <label class="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs cursor-pointer transition">
                     {{ isImporting() ? '⏳...' : '📥 PDF/TXT' }}
-                    <input
-                      type="file"
-                      accept=".pdf,.txt"
-                      multiple
-                      (change)="onFileInputChange($event, false)"
-                      class="hidden"
-                    />
+                    <input type="file" accept=".pdf,.txt" multiple (change)="onFileInputChange($event, false)" class="hidden" />
                   </label>
                   <button
                     (click)="openNewSongEditor()"
@@ -774,17 +1063,13 @@
               <div class="grid grid-cols-2 p-2 gap-1 bg-zinc-950/60 border-b border-zinc-800">
                 <button
                   (click)="navMode.set('library')"
-                  [class]="navMode() === 'library'
-                    ? 'bg-amber-500 text-zinc-950 font-semibold'
-                    : 'text-zinc-400 hover:bg-zinc-800'"
+                  [class]="navMode() === 'library' ? 'bg-amber-500 text-zinc-950 font-semibold' : 'text-zinc-400 hover:bg-zinc-800'"
                   class="py-1.5 rounded-lg text-sm transition">
                   📚 Repertório ({{ songs().length }})
                 </button>
                 <button
                   (click)="navMode.set('setlist')"
-                  [class]="navMode() === 'setlist'
-                    ? 'bg-amber-500 text-zinc-950 font-semibold'
-                    : 'text-zinc-400 hover:bg-zinc-800'"
+                  [class]="navMode() === 'setlist' ? 'bg-amber-500 text-zinc-950 font-semibold' : 'text-zinc-400 hover:bg-zinc-800'"
                   class="py-1.5 rounded-lg text-sm transition">
                   📋 Setlists ({{ setlists().length }})
                 </button>
@@ -842,6 +1127,7 @@
                 </div>
               }
 
+              <!-- Lista de Músicas -->
               <div class="flex-1 overflow-y-auto p-2 space-y-1">
                 @for (song of displayedSongs(); track song.id; let idx = $index) {
                   <div
@@ -864,12 +1150,8 @@
 
                     <div class="flex items-center gap-1 shrink-0">
                       @if (navMode() === 'setlist') {
-                        <button
-                          (click)="$event.stopPropagation(); moveSongInSetlist(idx, -1)"
-                          class="p-1 text-zinc-500 hover:text-white text-xs">▲</button>
-                        <button
-                          (click)="$event.stopPropagation(); moveSongInSetlist(idx, 1)"
-                          class="p-1 text-zinc-500 hover:text-white text-xs">▼</button>
+                        <button (click)="$event.stopPropagation(); moveSongInSetlist(idx, -1)" class="p-1 text-zinc-500 hover:text-white text-xs">▲</button>
+                        <button (click)="$event.stopPropagation(); moveSongInSetlist(idx, 1)" class="p-1 text-zinc-500 hover:text-white text-xs">▼</button>
                       }
                       <span class="text-xs font-mono px-2 py-0.5 rounded bg-zinc-950 text-amber-400 border border-zinc-800">
                         {{ getDisplayKey(song) }}
@@ -882,31 +1164,47 @@
                   </div>
                 }
               </div>
+
+              <!-- Rodapé da Barra Lateral: Backup SD/Memória & Pedal M-Vave -->
+              <div class="p-2.5 border-t border-zinc-800 bg-zinc-950/80 grid grid-cols-2 gap-2">
+                <button
+                  (click)="backupModalOpen.set(true)"
+                  class="py-2 px-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-200 flex items-center justify-center gap-1.5 transition">
+                  💾 Backup / SD
+                </button>
+                <button
+                  (click)="pedalModalOpen.set(true)"
+                  class="py-2 px-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-amber-400 flex items-center justify-center gap-1.5 transition">
+                  🎛️ Pedal M-Vave
+                </button>
+              </div>
             </aside>
           }
 
           <!-- ÁREA PRINCIPAL DO PALCO -->
           <main class="flex-1 flex flex-col h-full overflow-hidden">
             @if (activeSong(); as song) {
-              <header class="px-4 py-2.5 border-b border-zinc-800 flex flex-wrap items-center justify-between gap-3 bg-zinc-900/70">
-                <div class="flex items-center gap-3 min-w-0">
+              <header class="px-4 py-2 border-b border-zinc-800 flex flex-wrap items-center justify-between gap-2 bg-zinc-900/70">
+                
+                <!-- Esquerda: Modo Palco + Título -->
+                <div class="flex items-center gap-2.5 min-w-0">
                   <button
                     (click)="toggleStageMode()"
                     [class]="stageMode() ? 'bg-amber-500 text-zinc-950 font-bold' : 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700'"
                     class="px-3 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 shrink-0">
                     <span>{{ stageMode() ? '✕ Sair Palco' : '⛶ Palco' }}</span>
                     @if (wakeLockActive()) {
-                      <span class="w-2 h-2 rounded-full bg-emerald-500" title="Tela mantida ativa"></span>
+                      <span class="w-2 h-2 rounded-full bg-emerald-500" title="Tela ativa (Wake Lock)"></span>
                     }
                   </button>
 
                   <div class="min-w-0">
                     <div class="flex items-center gap-2">
-                      <h1 class="text-lg font-bold text-white truncate">{{ song.title }}</h1>
+                      <h1 class="text-base md:text-lg font-bold text-white truncate">{{ song.title }}</h1>
                       @if (!stageMode()) {
                         <button
                           (click)="openEditSongEditor(song)"
-                          class="text-xs px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300">
+                          class="text-xs px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 shrink-0">
                           ✏️ Editar
                         </button>
                       }
@@ -915,12 +1213,36 @@
                   </div>
                 </div>
 
-                <div class="flex items-center gap-2 flex-wrap">
-                  <!-- Fonte -->
+                <!-- Direita: Seletor Rápido Pedal M-Vave + Fonte + Auto-Scroll + Tom -->
+                <div class="flex items-center gap-1.5 flex-wrap">
+
+                  <!-- Seletor Rápido do Modo do Pedal M-Vave -->
                   <div class="flex items-center bg-zinc-950 rounded-xl border border-zinc-800 p-1">
-                    <button (click)="changeFontSize(-2)" class="px-2.5 py-1 text-xs font-bold hover:bg-zinc-800 rounded-lg">A-</button>
-                    <span class="px-2 text-xs font-mono text-zinc-400">{{ fontSize() }}px</span>
-                    <button (click)="changeFontSize(2)" class="px-2.5 py-1 text-xs font-bold hover:bg-zinc-800 rounded-lg">A+</button>
+                    <button
+                      (click)="cyclePedalMode()"
+                      title="Toque para alternar o modo do pedal M-Vave"
+                      class="px-2.5 py-1 rounded-lg bg-zinc-800/90 hover:bg-zinc-700 text-xs font-semibold text-amber-300 transition flex items-center gap-1">
+                      @if (pedalConfig().mode === 'smart') {
+                        <span>🧠 Inteligente</span>
+                      } @else if (pedalConfig().mode === 'scroll') {
+                        <span>📜 Rolar Cifra</span>
+                      } @else {
+                        <span>🎵 Trocar Música</span>
+                      }
+                    </button>
+                    <button
+                      (click)="pedalModalOpen.set(true)"
+                      title="Configurar e calibrar pedal M-Vave"
+                      class="px-2 py-1 text-xs text-zinc-400 hover:text-white">
+                      ⚙️
+                    </button>
+                  </div>
+
+                  <!-- Tamanho da Fonte -->
+                  <div class="flex items-center bg-zinc-950 rounded-xl border border-zinc-800 p-1">
+                    <button (click)="changeFontSize(-2)" class="px-2 py-1 text-xs font-bold hover:bg-zinc-800 rounded-lg">A-</button>
+                    <span class="px-1.5 text-xs font-mono text-zinc-400">{{ fontSize() }}</span>
+                    <button (click)="changeFontSize(2)" class="px-2 py-1 text-xs font-bold hover:bg-zinc-800 rounded-lg">A+</button>
                   </div>
 
                   <!-- Auto-Scroll -->
@@ -928,13 +1250,13 @@
                     <button
                       (click)="toggleAutoScroll()"
                       [class]="isScrolling() ? 'bg-emerald-500 text-zinc-950 font-bold' : 'bg-zinc-800 text-zinc-200'"
-                      class="px-3 py-1 rounded-lg text-xs font-semibold transition">
-                      {{ isScrolling() ? '⏸ Pausar' : '▶ Rolar' }}
+                      class="px-2.5 py-1 rounded-lg text-xs font-semibold transition">
+                      {{ isScrolling() ? '⏸' : '▶' }}
                     </button>
                     <select
                       [value]="scrollSpeed()"
                       (change)="scrollSpeed.set(+$any($event.target).value)"
-                      class="bg-zinc-900 text-xs text-amber-400 font-mono px-2 py-1 rounded-lg border border-zinc-800">
+                      class="bg-zinc-900 text-xs text-amber-400 font-mono px-1.5 py-1 rounded-lg border border-zinc-800">
                       @for (spd of [1,2,3,4,5,6,7,8,9,10]; track spd) {
                         <option [value]="spd">{{ spd }}x</option>
                       }
@@ -943,14 +1265,14 @@
 
                   <!-- Transposição -->
                   <div class="flex items-center gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800">
-                    <button (click)="changeTranspose(-1)" class="px-3 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 font-bold text-sm">-½</button>
-                    <button (click)="resetTranspose()" class="px-2.5 py-0.5 text-center min-w-[64px]">
+                    <button (click)="changeTranspose(-1)" class="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 font-bold text-xs">-½</button>
+                    <button (click)="resetTranspose()" class="px-2 py-0.5 text-center min-w-[54px]">
                       <div class="text-[9px] uppercase text-zinc-500">
                         {{ song.transpose !== 0 ? (song.transpose > 0 ? '+' + song.transpose : song.transpose) : 'Tom' }}
                       </div>
-                      <div class="font-mono font-bold text-sm text-amber-400 leading-tight">{{ currentSongKey() }}</div>
+                      <div class="font-mono font-bold text-xs text-amber-400 leading-tight">{{ currentSongKey() }}</div>
                     </button>
-                    <button (click)="changeTranspose(1)" class="px-3 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 font-bold text-sm">+½</button>
+                    <button (click)="changeTranspose(1)" class="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 font-bold text-xs">+½</button>
                   </div>
                 </div>
               </header>
@@ -961,7 +1283,7 @@
                 class="flex-1 overflow-y-auto p-6 md:px-10 bg-zinc-950">
                 <div
                   [style.fontSize.px]="fontSize()"
-                  class="font-cifra leading-relaxed whitespace-pre pb-48">
+                  class="font-cifra leading-relaxed whitespace-pre pb-56">
                   @for (line of renderedLines(); track line.id) {
                     <div class="min-h-[1.5em]">
                       @for (seg of line.segments; track $index) {
@@ -987,6 +1309,170 @@
             }
           </main>
 
+          <!-- =============================================================== -->
+          <!-- MODAL: CONFIGURAÇÃO E CALIBRAGEM DO PEDAL M-VAVE CUBE TURNER    -->
+          <!-- =============================================================== -->
+          @if (pedalModalOpen()) {
+            <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div class="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-xl max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
+                <div class="p-4 border-b border-zinc-800 flex items-center justify-between">
+                  <div>
+                    <h2 class="font-bold text-lg text-amber-400">🎛️ Pedal M-Vave Cube Turner</h2>
+                    <p class="text-xs text-zinc-400">Configure os modos, distância do pulo e calibragem individual</p>
+                  </div>
+                  <button (click)="learningAction.set(null); pedalModalOpen.set(false)" class="text-zinc-400 hover:text-white px-2">✕</button>
+                </div>
+
+                <div class="p-4 space-y-4 overflow-y-auto flex-1">
+                  <!-- 1. Modo de Operação -->
+                  <div>
+                    <label class="text-xs font-semibold uppercase tracking-wider text-zinc-400 block mb-2">1. Comportamento dos Pedais Principais</label>
+                    <div class="grid grid-cols-3 gap-2">
+                      <button
+                        (click)="updatePedalConfig({ mode: 'smart' })"
+                        [class]="pedalConfig().mode === 'smart' ? 'bg-amber-500 text-zinc-950 font-bold border-amber-400' : 'bg-zinc-950 text-zinc-300 border-zinc-800'"
+                        class="p-2.5 rounded-xl border text-xs text-center transition">
+                        🧠 Inteligente<br/><span class="text-[10px] opacity-80">Rola e troca no fim</span>
+                      </button>
+                      <button
+                        (click)="updatePedalConfig({ mode: 'scroll' })"
+                        [class]="pedalConfig().mode === 'scroll' ? 'bg-amber-500 text-zinc-950 font-bold border-amber-400' : 'bg-zinc-950 text-zinc-300 border-zinc-800'"
+                        class="p-2.5 rounded-xl border text-xs text-center transition">
+                        📜 Rolar Cifra<br/><span class="text-[10px] opacity-80">Apenas sobe/desce</span>
+                      </button>
+                      <button
+                        (click)="updatePedalConfig({ mode: 'song' })"
+                        [class]="pedalConfig().mode === 'song' ? 'bg-amber-500 text-zinc-950 font-bold border-amber-400' : 'bg-zinc-950 text-zinc-300 border-zinc-800'"
+                        class="p-2.5 rounded-xl border text-xs text-center transition">
+                        🎵 Trocar Música<br/><span class="text-[10px] opacity-80">Anterior / Próxima</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <!-- 2. Ajustes de Rolagem -->
+                  <div class="grid grid-cols-2 gap-3">
+                    <div>
+                      <label class="text-xs font-semibold uppercase tracking-wider text-zinc-400 block mb-1.5">Distância do Pulo</label>
+                      <div class="grid grid-cols-3 gap-1.5">
+                        @for (pct of [25, 45, 75]; track pct) {
+                          <button
+                            (click)="updatePedalConfig({ scrollPercent: pct })"
+                            [class]="pedalConfig().scrollPercent === pct ? 'bg-amber-500 text-zinc-950 font-bold' : 'bg-zinc-950 text-zinc-300 border border-zinc-800'"
+                            class="py-2 rounded-lg text-xs font-mono">
+                            {{ pct }}%
+                          </button>
+                        }
+                      </div>
+                    </div>
+
+                    <div>
+                      <label class="text-xs font-semibold uppercase tracking-wider text-zinc-400 block mb-1.5">Animação da Rolagem</label>
+                      <div class="grid grid-cols-2 gap-1.5">
+                        <button
+                          (click)="updatePedalConfig({ smoothScroll: true })"
+                          [class]="pedalConfig().smoothScroll ? 'bg-amber-500 text-zinc-950 font-bold' : 'bg-zinc-950 text-zinc-300 border border-zinc-800'"
+                          class="py-2 rounded-lg text-xs">
+                          Suave
+                        </button>
+                        <button
+                          (click)="updatePedalConfig({ smoothScroll: false })"
+                          [class]="!pedalConfig().smoothScroll ? 'bg-amber-500 text-zinc-950 font-bold' : 'bg-zinc-950 text-zinc-300 border border-zinc-800'"
+                          class="py-2 rounded-lg text-xs">
+                          Instantânea
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 3. Modo Aprendizado (Calibragem Individual das 4 Ações) -->
+                  <div>
+                    <div class="flex items-center justify-between mb-2">
+                      <label class="text-xs font-semibold uppercase tracking-wider text-zinc-400">2. Calibragem Individual (Modo Aprendizado)</label>
+                      @if (lastKeyPressed()) {
+                        <span class="text-[11px] font-mono text-zinc-500">Última tecla: {{ lastKeyPressed() }}</span>
+                      }
+                    </div>
+
+                    <div class="space-y-2">
+                      @for (item of [
+                        { key: 'scrollUp', label: '⬆️ Rolar para Cima' },
+                        { key: 'scrollDown', label: '⬇️ Rolar para Baixo' },
+                        { key: 'prevSong', label: '⏮️ Música Anterior' },
+                        { key: 'nextSong', label: '⏭️ Próxima Música' }
+                      ]; track item.key) {
+                        <div class="flex items-center justify-between p-2.5 rounded-xl bg-zinc-950 border border-zinc-800">
+                          <div>
+                            <div class="text-sm font-medium text-zinc-200">{{ item.label }}</div>
+                            <div class="text-xs font-mono text-amber-400">
+                              Teclas: {{ pedalConfig().bindings[item.key].join(', ') }}
+                            </div>
+                          </div>
+
+                          <button
+                            (click)="learningAction.set(learningAction() === item.key ? null : item.key)"
+                            [class]="learningAction() === item.key
+                              ? 'bg-emerald-500 text-zinc-950 font-bold animate-pulse'
+                              : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200'"
+                            class="px-3 py-1.5 rounded-lg text-xs font-semibold transition">
+                            {{ learningAction() === item.key ? '👣 Pise no pedal agora...' : '🎯 Gravar tecla' }}
+                          </button>
+                        </div>
+                      }
+                    </div>
+                  </div>
+                </div>
+
+                <div class="p-4 border-t border-zinc-800 flex items-center justify-between bg-zinc-950/50">
+                  <button
+                    (click)="resetPedalDefaults()"
+                    class="text-xs text-zinc-400 hover:text-white underline">
+                    Restaurar Padrão M-Vave
+                  </button>
+                  <button
+                    (click)="learningAction.set(null); pedalModalOpen.set(false)"
+                    class="px-5 py-2 rounded-xl bg-amber-500 text-zinc-950 font-bold text-sm">
+                    Concluir
+                  </button>
+                </div>
+              </div>
+            </div>
+          }
+
+          <!-- =============================================================== -->
+          <!-- MODAL: BACKUP E RESTAURAÇÃO (MEMÓRIA INTERNA / MICROSD)         -->
+          <!-- =============================================================== -->
+          @if (backupModalOpen()) {
+            <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div class="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-md flex flex-col overflow-hidden shadow-2xl">
+                <div class="p-4 border-b border-zinc-800 flex items-center justify-between">
+                  <h2 class="font-bold text-lg text-amber-400">💾 Backup & Cartão microSD</h2>
+                  <button (click)="backupModalOpen.set(false)" class="text-zinc-400 hover:text-white px-2">✕</button>
+                </div>
+
+                <div class="p-5 space-y-4 text-sm text-zinc-300">
+                  <p class="text-xs text-zinc-400 leading-relaxed">
+                    Suas cifras ficam salvas automaticamente na memória interna do navegador para uso 100% offline. Use as opções abaixo para gravar ou restaurar uma cópia de segurança (<code>.json</code>) no seu <strong>cartão microSD</strong> ou pasta interna.
+                  </p>
+
+                  <button
+                    (click)="exportBackupJson()"
+                    class="w-full py-3 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-sm flex items-center justify-center gap-2 transition">
+                    📤 Salvar Backup (.JSON) no Dispositivo / SD
+                  </button>
+
+                  <label class="w-full py-3 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-100 font-semibold text-sm flex items-center justify-center gap-2 cursor-pointer transition">
+                    📥 Restaurar Backup (.JSON) do Dispositivo / SD
+                    <input type="file" accept=".json,application/json" (change)="importBackupJson($event)" class="hidden" />
+                  </label>
+                </div>
+
+                <div class="p-3 border-t border-zinc-800 flex justify-end bg-zinc-950/50">
+                  <button (click)="backupModalOpen.set(false)" class="px-4 py-1.5 rounded-lg bg-zinc-800 text-xs">Fechar</button>
+                </div>
+              </div>
+            </div>
+          }
+
           <!-- MODAL EDITOR -->
           @if (editorOpen()) {
             <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -996,15 +1482,9 @@
                     <h2 class="font-bold text-lg text-amber-400">
                       {{ editingSongId() ? '✏️ Editar Cifra' : '➕ Nova Cifra' }}
                     </h2>
-                    <!-- Botão Importar PDF/TXT dentro do editor -->
                     <label class="px-3 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-200 cursor-pointer font-semibold">
                       📥 PDF/TXT
-                      <input
-                        type="file"
-                        accept=".pdf,.txt"
-                        (change)="onFileInputChange($event, true)"
-                        class="hidden"
-                      />
+                      <input type="file" accept=".pdf,.txt" (change)="onFileInputChange($event, true)" class="hidden" />
                     </label>
                   </div>
                   <button (click)="editorOpen.set(false)" class="text-zinc-400 hover:text-white px-2">✕</button>
