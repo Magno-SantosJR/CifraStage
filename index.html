@@ -34,8 +34,8 @@
     .font-cifra {
       font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
     }
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: #09090b; }
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 3px; }
   </style>
 </head>
@@ -47,7 +47,7 @@
     </div>
   </app-root>
 
-  <!-- REGISTRO PWA (Manifest Dinâmico + Service Worker Offline para Tela Inicial) -->
+  <!-- REGISTRO PWA OFFLINE -->
   <script>
     (function setupPWA() {
       const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#09090b"/><text x="50%" y="54%" font-size="280" text-anchor="middle" dominant-baseline="middle">🎸</text></svg>`;
@@ -71,16 +71,11 @@
       link.href = URL.createObjectURL(manifestBlob);
       document.head.appendChild(link);
 
-      // Service Worker embutido para cache 100% offline quando hospedado em HTTPS (GitHub Pages/Vercel)
       if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
         const swCode = `
-          const CACHE_NAME = 'cifrastage-offline-v1';
-          self.addEventListener('install', (e) => {
-            self.skipWaiting();
-          });
-          self.addEventListener('activate', (e) => {
-            e.waitUntil(clients.claim());
-          });
+          const CACHE_NAME = 'cifrastage-offline-v2';
+          self.addEventListener('install', () => self.skipWaiting());
+          self.addEventListener('activate', (e) => e.waitUntil(clients.claim()));
           self.addEventListener('fetch', (e) => {
             if (e.request.method !== 'GET') return;
             e.respondWith(
@@ -278,12 +273,12 @@
     }
 
     // =========================================================================
-    // 3. DADOS E CONFIGURAÇÕES PADRÃO (INCLUINDO PEDAL M-VAVE CUBE TURNER)
+    // 3. DADOS INICIAIS E CONFIGURAÇÃO DO PEDAL
     // =========================================================================
     const DEFAULT_PEDAL_CONFIG = {
-      mode: 'smart',         // 'smart' | 'scroll' | 'song'
-      scrollPercent: 45,     // 25 | 45 | 75 (% da altura visível)
-      smoothScroll: true,    // true = suave | false = instantânea
+      mode: 'smart',
+      scrollPercent: 45,
+      smoothScroll: true,
       bindings: {
         scrollUp:   ['PageUp', 'ArrowUp'],
         scrollDown: ['PageDown', 'ArrowDown'],
@@ -322,13 +317,14 @@
     // =========================================================================
     class AppComponent {
       constructor() {
-        // Estado persistido no localStorage (memória interna do dispositivo)
         this.songs = signal(this.loadStorage('cifrastage_songs', DEMO_SONGS));
         this.setlists = signal(this.loadStorage('cifrastage_setlists', DEMO_SETLISTS));
         this.fontSize = signal(this.loadStorage('cifrastage_fontsize', 18));
         this.pedalConfig = signal(this.loadStorage('cifrastage_pedal', DEFAULT_PEDAL_CONFIG));
 
-        // Navegação e filtros
+        // Estado da barra lateral estilo Rail (false = estreita 64px, true = expandida)
+        this.sidebarExpanded = signal(this.loadStorage('cifrastage_sidebar_exp', false));
+
         this.navMode = signal('library');
         this.activeSetlistId = signal(this.setlists()[0]?.id || '');
         this.activeSongId = signal(this.songs()[0]?.id || '');
@@ -336,18 +332,15 @@
         this.selectedGenre = signal('');
         this.selectedArtist = signal('');
 
-        // Modo Palco e Wake Lock
         this.stageMode = signal(false);
         this.wakeLockActive = signal(false);
         this.wakeLockSentinel = null;
 
-        // Auto-Scroll
         this.isScrolling = signal(false);
         this.scrollSpeed = signal(2);
         this.scrollAccumulator = 0;
         this.scrollRafId = null;
 
-        // Importação e Feedback Visual
         this.isDragging = signal(false);
         this.isImporting = signal(false);
         this.toastMessage = signal('');
@@ -362,9 +355,10 @@
 
         this.setlistModalOpen = signal(false);
         this.newSetlistName = signal('');
+        this.editSetlistName = signal('');
 
         this.pedalModalOpen = signal(false);
-        this.learningAction = signal(null); // 'scrollUp' | 'scrollDown' | 'prevSong' | 'nextSong' | null
+        this.learningAction = signal(null);
         this.lastKeyPressed = signal('');
 
         this.backupModalOpen = signal(false);
@@ -453,35 +447,130 @@
           });
         });
 
-        // Effects de salvamento automático
         effect(() => localStorage.setItem('cifrastage_songs', JSON.stringify(this.songs())));
         effect(() => localStorage.setItem('cifrastage_setlists', JSON.stringify(this.setlists())));
         effect(() => localStorage.setItem('cifrastage_fontsize', JSON.stringify(this.fontSize())));
         effect(() => localStorage.setItem('cifrastage_pedal', JSON.stringify(this.pedalConfig())));
+        effect(() => localStorage.setItem('cifrastage_sidebar_exp', JSON.stringify(this.sidebarExpanded())));
 
-        // Ouvinte global do Pedal Bluetooth M-Vave Cube Turner
         window.addEventListener('keydown', (e) => this.handleGlobalKeydown(e), { passive: false });
       }
 
       // =======================================================================
-      // INTEGRAÇÃO PEDAL M-VAVE CUBE TURNER (3 MODOS + MODO APRENDIZADO)
+      // NAVEGAÇÃO DA BARRA LATERAL COMPACTA (RAIL)
+      // =======================================================================
+      toggleSidebar() {
+        this.sidebarExpanded.update(v => !v);
+      }
+
+      selectNavTab(mode) {
+        if (this.navMode() === mode) {
+          this.sidebarExpanded.update(v => !v);
+        } else {
+          this.navMode.set(mode);
+          this.sidebarExpanded.set(true);
+        }
+      }
+
+      getSongInitials(title) {
+        const clean = (title || '').trim();
+        if (!clean) return '♪';
+        const words = clean.split(/\s+/);
+        if (words.length >= 2) {
+          return (words[0][0] + words[1][0]).toUpperCase();
+        }
+        return clean.slice(0, 2).toUpperCase();
+      }
+
+      // =======================================================================
+      // GERENCIAMENTO E RENOMEAÇÃO DE SETLISTS
+      // =======================================================================
+      openSetlistModal() {
+        const current = this.currentSetlist();
+        this.editSetlistName.set(current ? current.name : '');
+        this.setlistModalOpen.set(true);
+      }
+
+      onActiveSetlistSelect(setId) {
+        this.activeSetlistId.set(setId);
+        const found = this.setlists().find(s => s.id === setId);
+        this.editSetlistName.set(found ? found.name : '');
+      }
+
+      renameCurrentSetlist() {
+        const current = this.currentSetlist();
+        const trimmed = this.editSetlistName().trim();
+        if (!current || !trimmed) return;
+
+        this.setlists.update(list =>
+          list.map(s => s.id === current.id ? { ...s, name: trimmed } : s)
+        );
+        this.showToast(`Setlist renomeado para "${trimmed}"`);
+      }
+
+      createSetlist() {
+        const name = this.newSetlistName().trim();
+        if (!name) return;
+        const newId = 'set-' + Date.now();
+        this.setlists.update(list => [...list, { id: newId, name, songIds: [] }]);
+        this.activeSetlistId.set(newId);
+        this.editSetlistName.set(name);
+        this.newSetlistName.set('');
+        this.showToast(`Setlist "${name}" criado!`);
+      }
+
+      deleteCurrentSetlist() {
+        const current = this.currentSetlist();
+        if (!current) return;
+        if (!confirm(`Excluir o setlist "${current.name}"?`)) return;
+        this.setlists.update(list => list.filter(s => s.id !== current.id));
+        const nextSet = this.setlists()[0] || null;
+        this.activeSetlistId.set(nextSet ? nextSet.id : '');
+        this.editSetlistName.set(nextSet ? nextSet.name : '');
+      }
+
+      toggleSongInSetlist(songId) {
+        const setId = this.activeSetlistId();
+        if (!setId) return;
+        this.setlists.update(list => list.map(set => {
+          if (set.id !== setId) return set;
+          const exists = set.songIds.includes(songId);
+          return {
+            ...set,
+            songIds: exists ? set.songIds.filter(id => id !== songId) : [...set.songIds, songId]
+          };
+        }));
+      }
+
+      moveSongInSetlist(index, direction) {
+        const setId = this.activeSetlistId();
+        this.setlists.update(list => list.map(set => {
+          if (set.id !== setId) return set;
+          const ids = [...set.songIds];
+          const targetIdx = index + direction;
+          if (targetIdx < 0 || targetIdx >= ids.length) return set;
+          [ids[index], ids[targetIdx]] = [ids[targetIdx], ids[index]];
+          return { ...set, songIds: ids };
+        }));
+      }
+
+      // =======================================================================
+      // PEDAL M-VAVE CUBE TURNER
       // =======================================================================
       handleGlobalKeydown(event) {
         const keyCode = event.code || event.key;
         this.lastKeyPressed.set(keyCode);
 
-        // 1. Se está no Modo Aprendizado (Calibragem Individual)
         const learning = this.learningAction();
         if (learning) {
           event.preventDefault();
           event.stopPropagation();
           this.assignPedalKey(learning, keyCode);
           this.learningAction.set(null);
-          this.showToast(`Tecla "${keyCode}" gravada com sucesso!`);
+          this.showToast(`Tecla "${keyCode}" gravada!`);
           return;
         }
 
-        // Ignora atalhos se o usuário estiver digitando dentro de um input ou textarea
         const tag = event.target?.tagName?.toLowerCase();
         if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
         if (this.editorOpen() || this.setlistModalOpen() || this.pedalModalOpen() || this.backupModalOpen()) return;
@@ -498,17 +587,9 @@
 
         event.preventDefault();
 
-        // Ações diretas de música anterior / próxima
-        if (isPrev) {
-          this.navigateSong(-1);
-          return;
-        }
-        if (isNext) {
-          this.navigateSong(1);
-          return;
-        }
+        if (isPrev) { this.navigateSong(-1); return; }
+        if (isNext) { this.navigateSong(1); return; }
 
-        // Ações nos pedais principais (Cima / Baixo) conforme o modo ativo
         if (cfg.mode === 'song') {
           this.navigateSong(isDown ? 1 : -1);
           return;
@@ -519,25 +600,16 @@
           return;
         }
 
-        // Modo 'smart' (Inteligente): rola e, ao atingir o topo/fim, troca de música
         if (cfg.mode === 'smart') {
           const container = document.getElementById('cifra-scroll-container');
           if (!container) return;
 
           if (isDown) {
             const atBottom = (container.scrollTop + container.clientHeight) >= (container.scrollHeight - 10);
-            if (atBottom) {
-              this.navigateSong(1);
-            } else {
-              this.stepScroll(1);
-            }
+            atBottom ? this.navigateSong(1) : this.stepScroll(1);
           } else if (isUp) {
             const atTop = container.scrollTop <= 10;
-            if (atTop) {
-              this.navigateSong(-1);
-            } else {
-              this.stepScroll(-1);
-            }
+            atTop ? this.navigateSong(-1) : this.stepScroll(-1);
           }
         }
       }
@@ -587,7 +659,6 @@
 
       assignPedalKey(action, keyCode) {
         this.pedalConfig.update(cfg => {
-          // Remove a tecla de outras ações para evitar conflito e define na ação escolhida
           const cleanedBindings = {};
           for (const k of Object.keys(cfg.bindings)) {
             cleanedBindings[k] = cfg.bindings[k].filter(code => code !== keyCode);
@@ -600,11 +671,11 @@
       resetPedalDefaults() {
         this.pedalConfig.set(JSON.parse(JSON.stringify(DEFAULT_PEDAL_CONFIG)));
         this.learningAction.set(null);
-        this.showToast('Configurações padrão do M-Vave restauradas!');
+        this.showToast('Padrão M-Vave restaurado!');
       }
 
       // =======================================================================
-      // BACKUP E RESTAURAÇÃO EM ARQUIVO .JSON (MEMÓRIA INTERNA / MICROSD)
+      // BACKUP E RESTAURAÇÃO (.JSON)
       // =======================================================================
       async exportBackupJson() {
         const payload = {
@@ -620,7 +691,6 @@
         const jsonStr = JSON.stringify(payload, null, 2);
         const filename = `cifrastage-backup-${new Date().toISOString().slice(0, 10)}.json`;
 
-        // Tenta abrir o seletor nativo do Android/PC (permite escolher pasta do microSD diretamente)
         if ('showSaveFilePicker' in window) {
           try {
             const handle = await window.showSaveFilePicker({
@@ -633,11 +703,10 @@
             this.showToast('Backup salvo na pasta escolhida!');
             return;
           } catch (err) {
-            if (err.name === 'AbortError') return; // Usuário cancelou
+            if (err.name === 'AbortError') return;
           }
         }
 
-        // Fallback universal de download (vai para Downloads ou pasta configurada no navegador)
         const blob = new Blob([jsonStr], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -645,7 +714,7 @@
         a.download = filename;
         a.click();
         URL.revokeObjectURL(url);
-        this.showToast('Arquivo de backup .JSON baixado!');
+        this.showToast('Backup .JSON baixado!');
       }
 
       async importBackupJson(event) {
@@ -656,10 +725,7 @@
         try {
           const text = await file.text();
           const data = JSON.parse(text);
-
-          if (!Array.isArray(data.songs)) {
-            throw new Error('Arquivo JSON inválido ou incompatível.');
-          }
+          if (!Array.isArray(data.songs)) throw new Error('Arquivo JSON inválido.');
 
           this.songs.set(data.songs);
           if (Array.isArray(data.setlists)) this.setlists.set(data.setlists);
@@ -669,9 +735,9 @@
           this.activeSongId.set(data.songs[0]?.id || '');
           this.activeSetlistId.set(data.setlists?.[0]?.id || '');
           this.backupModalOpen.set(false);
-          this.showToast(`Backup restaurado! ${data.songs.length} músicas carregadas.`);
+          this.showToast(`Backup restaurado! ${data.songs.length} músicas.`);
         } catch (err) {
-          this.showToast('Erro ao restaurar backup: ' + err.message);
+          this.showToast('Erro ao restaurar: ' + err.message);
         }
       }
 
@@ -697,17 +763,13 @@
         event.stopPropagation();
         this.isDragging.set(false);
         const files = Array.from(event.dataTransfer?.files || []);
-        if (files.length > 0) {
-          await this.processImportedFiles(files, false);
-        }
+        if (files.length > 0) await this.processImportedFiles(files, false);
       }
 
       async onFileInputChange(event, intoEditor = false) {
         const files = Array.from(event.target.files || []);
         event.target.value = '';
-        if (files.length > 0) {
-          await this.processImportedFiles(files, intoEditor);
-        }
+        if (files.length > 0) await this.processImportedFiles(files, intoEditor);
       }
 
       async processImportedFiles(files, intoEditor = false) {
@@ -750,7 +812,7 @@
             if (!this.formTitle().trim()) this.formTitle.set(first.title);
             if (!this.formArtist().trim()) this.formArtist.set(first.artist);
             this.formContent.set(first.rawContent);
-            this.showToast('Conteúdo carregado no editor!');
+            this.showToast('Carregado no editor!');
           } else {
             this.songs.update(list => [...importedSongs, ...list]);
             this.activeSongId.set(importedSongs[0].id);
@@ -770,11 +832,11 @@
         this.toastMessage.set(msg);
         setTimeout(() => {
           if (this.toastMessage() === msg) this.toastMessage.set('');
-        }, 3800);
+        }, 3600);
       }
 
       // =======================================================================
-      // CONTROLES DE PALCO, FONTE, TRANSPOSIÇÃO, EDITOR E SETLISTS
+      // PALCO, FONTE, TRANSPOSIÇÃO E EDITOR
       // =======================================================================
       selectSong(songId) {
         this.stopAutoScroll();
@@ -948,48 +1010,6 @@
         this.editorOpen.set(false);
       }
 
-      createSetlist() {
-        const name = this.newSetlistName().trim();
-        if (!name) return;
-        const newId = 'set-' + Date.now();
-        this.setlists.update(list => [...list, { id: newId, name, songIds: [] }]);
-        this.activeSetlistId.set(newId);
-        this.newSetlistName.set('');
-      }
-
-      deleteCurrentSetlist() {
-        const current = this.currentSetlist();
-        if (!current) return;
-        if (!confirm(`Excluir o setlist "${current.name}"?`)) return;
-        this.setlists.update(list => list.filter(s => s.id !== current.id));
-        this.activeSetlistId.set(this.setlists()[0]?.id || '');
-      }
-
-      toggleSongInSetlist(songId) {
-        const setId = this.activeSetlistId();
-        if (!setId) return;
-        this.setlists.update(list => list.map(set => {
-          if (set.id !== setId) return set;
-          const exists = set.songIds.includes(songId);
-          return {
-            ...set,
-            songIds: exists ? set.songIds.filter(id => id !== songId) : [...set.songIds, songId]
-          };
-        }));
-      }
-
-      moveSongInSetlist(index, direction) {
-        const setId = this.activeSetlistId();
-        this.setlists.update(list => list.map(set => {
-          if (set.id !== setId) return set;
-          const ids = [...set.songIds];
-          const targetIdx = index + direction;
-          if (targetIdx < 0 || targetIdx >= ids.length) return set;
-          [ids[index], ids[targetIdx]] = [ids[targetIdx], ids[index]];
-          return { ...set, songIds: ids };
-        }));
-      }
-
       onGenreChange(newGenre) {
         this.selectedGenre.set(newGenre);
         if (newGenre && this.selectedArtist()) {
@@ -1011,7 +1031,7 @@
     }
 
     // =========================================================================
-    // 5. TEMPLATE FINAL
+    // 5. TEMPLATE COM RAIL LATERAL COMPACTO ESTILO CHROME
     // =========================================================================
     Component({
       selector: 'app-root',
@@ -1034,159 +1054,234 @@
             </div>
           }
 
-          <!-- TOAST DE NOTIFICAÇÃO -->
+          <!-- TOAST -->
           @if (toastMessage()) {
             <div class="fixed bottom-5 right-5 z-50 bg-zinc-900 border border-amber-500/60 text-amber-300 px-4 py-3 rounded-xl shadow-2xl text-sm font-medium">
               {{ toastMessage() }}
             </div>
           }
 
-          <!-- BARRA LATERAL -->
+          <!-- =============================================================== -->
+          <!-- BARRA LATERAL ESTILO RAIL DO CHROME (COMPACTA OU EXPANDIDA)     -->
+          <!-- =============================================================== -->
           @if (!stageMode()) {
-            <aside class="w-80 border-r border-zinc-800 bg-zinc-900/95 flex flex-col h-full shrink-0">
-              <div class="p-3 border-b border-zinc-800 flex items-center justify-between gap-1.5">
-                <span class="font-bold text-base tracking-tight text-amber-400">🎸 CifraStage</span>
-                <div class="flex items-center gap-1.5">
-                  <label class="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs cursor-pointer transition">
-                    {{ isImporting() ? '⏳...' : '📥 PDF/TXT' }}
-                    <input type="file" accept=".pdf,.txt" multiple (change)="onFileInputChange($event, false)" class="hidden" />
-                  </label>
+            <aside
+              [class]="sidebarExpanded() ? 'w-72' : 'w-16'"
+              class="border-r border-zinc-800 bg-zinc-900/95 flex flex-col h-full shrink-0 transition-all duration-200 overflow-hidden">
+
+              <!-- TOPO: Logo Guitarrinha + CS e Botão Expandir/Recolher -->
+              <div class="h-14 px-2 border-b border-zinc-800 flex items-center justify-between shrink-0">
+                <button
+                  (click)="toggleSidebar()"
+                  title="Expandir ou recolher barra lateral"
+                  class="flex items-center gap-1.5 px-2 py-1.5 rounded-xl hover:bg-zinc-800 transition">
+                  <span class="text-lg leading-none">🎸</span>
+                  <span class="font-black tracking-tight text-amber-400 text-sm">
+                    {{ sidebarExpanded() ? 'CifraStage' : 'CS' }}
+                  </span>
+                </button>
+
+                @if (sidebarExpanded()) {
+                  <button
+                    (click)="toggleSidebar()"
+                    title="Recolher barra"
+                    class="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 text-xs">
+                    ◀
+                  </button>
+                }
+              </div>
+
+              <!-- AÇÕES RÁPIDAS (Ícones estilo Rail) -->
+              <div class="p-2 border-b border-zinc-800 flex flex-col gap-1.5 shrink-0">
+                <div [class]="sidebarExpanded() ? 'grid grid-cols-2 gap-1.5' : 'flex flex-col gap-1.5'">
+                  <!-- Nova Cifra -->
                   <button
                     (click)="openNewSongEditor()"
-                    class="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-xs transition">
-                    + Nova
+                    title="Nova Cifra"
+                    class="py-2 px-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-xs flex items-center justify-center gap-1.5 transition">
+                    <span>➕</span>
+                    @if (sidebarExpanded()) { <span>Nova Cifra</span> }
+                  </button>
+
+                  <!-- Importar PDF/TXT -->
+                  <label
+                    title="Importar arquivos .PDF ou .TXT"
+                    class="py-2 px-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition">
+                    <span>{{ isImporting() ? '⏳' : '📥' }}</span>
+                    @if (sidebarExpanded()) { <span>PDF / TXT</span> }
+                    <input type="file" accept=".pdf,.txt" multiple (change)="onFileInputChange($event, false)" class="hidden" />
+                  </label>
+                </div>
+
+                <!-- Alternador Repertório vs Setlists -->
+                <div [class]="sidebarExpanded() ? 'grid grid-cols-2 gap-1 bg-zinc-950/70 p-1 rounded-xl' : 'flex flex-col gap-1'">
+                  <button
+                    (click)="selectNavTab('library')"
+                    title="Repertório Geral (Gênero / Artista)"
+                    [class]="navMode() === 'library'
+                      ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 font-semibold'
+                      : 'text-zinc-400 hover:bg-zinc-800 border border-transparent'"
+                    class="py-1.5 px-2 rounded-lg text-xs flex items-center justify-center gap-1.5 transition">
+                    <span>📚</span>
+                    @if (sidebarExpanded()) { <span>Repertório</span> }
+                  </button>
+
+                  <button
+                    (click)="selectNavTab('setlist')"
+                    title="Setlists / Playlists"
+                    [class]="navMode() === 'setlist'
+                      ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 font-semibold'
+                      : 'text-zinc-400 hover:bg-zinc-800 border border-transparent'"
+                    class="py-1.5 px-2 rounded-lg text-xs flex items-center justify-center gap-1.5 transition">
+                    <span>📋</span>
+                    @if (sidebarExpanded()) { <span>Setlists</span> }
                   </button>
                 </div>
               </div>
 
-              <!-- Abas -->
-              <div class="grid grid-cols-2 p-2 gap-1 bg-zinc-950/60 border-b border-zinc-800">
-                <button
-                  (click)="navMode.set('library')"
-                  [class]="navMode() === 'library' ? 'bg-amber-500 text-zinc-950 font-semibold' : 'text-zinc-400 hover:bg-zinc-800'"
-                  class="py-1.5 rounded-lg text-sm transition">
-                  📚 Repertório ({{ songs().length }})
-                </button>
-                <button
-                  (click)="navMode.set('setlist')"
-                  [class]="navMode() === 'setlist' ? 'bg-amber-500 text-zinc-950 font-semibold' : 'text-zinc-400 hover:bg-zinc-800'"
-                  class="py-1.5 rounded-lg text-sm transition">
-                  📋 Setlists ({{ setlists().length }})
-                </button>
-              </div>
+              <!-- FILTROS OU SELETOR DE SETLIST (Aparecem quando a barra está expandida) -->
+              @if (sidebarExpanded()) {
+                @if (navMode() === 'library') {
+                  <div class="p-2.5 space-y-2 border-b border-zinc-800 bg-zinc-900 shrink-0">
+                    <input
+                      type="text"
+                      [value]="searchQuery()"
+                      (input)="searchQuery.set($any($event.target).value)"
+                      placeholder="🔍 Buscar música ou artista..."
+                      class="w-full px-2.5 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs focus:outline-none focus:border-amber-500"
+                    />
+                    <div class="grid grid-cols-2 gap-1.5">
+                      <select
+                        [value]="selectedGenre()"
+                        (change)="onGenreChange($any($event.target).value)"
+                        class="px-2 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-300">
+                        <option value="">Gêneros</option>
+                        @for (genre of availableGenres(); track genre) {
+                          <option [value]="genre">{{ genre }}</option>
+                        }
+                      </select>
 
-              @if (navMode() === 'library') {
-                <div class="p-3 space-y-2 border-b border-zinc-800 bg-zinc-900">
-                  <input
-                    type="text"
-                    [value]="searchQuery()"
-                    (input)="searchQuery.set($any($event.target).value)"
-                    placeholder="🔍 Buscar título ou artista..."
-                    class="w-full px-3 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-sm focus:outline-none focus:border-amber-500"
-                  />
-
-                  <div class="grid grid-cols-2 gap-2">
-                    <select
-                      [value]="selectedGenre()"
-                      (change)="onGenreChange($any($event.target).value)"
-                      class="px-2 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-300">
-                      <option value="">Todos Gêneros</option>
-                      @for (genre of availableGenres(); track genre) {
-                        <option [value]="genre">{{ genre }}</option>
-                      }
-                    </select>
-
-                    <select
-                      [value]="selectedArtist()"
-                      (change)="selectedArtist.set($any($event.target).value)"
-                      class="px-2 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-300">
-                      <option value="">Todos Artistas</option>
-                      @for (artist of availableArtists(); track artist) {
-                        <option [value]="artist">{{ artist }}</option>
-                      }
-                    </select>
+                      <select
+                        [value]="selectedArtist()"
+                        (change)="selectedArtist.set($any($event.target).value)"
+                        class="px-2 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-300">
+                        <option value="">Artistas</option>
+                        @for (artist of availableArtists(); track artist) {
+                          <option [value]="artist">{{ artist }}</option>
+                        }
+                      </select>
+                    </div>
                   </div>
-                </div>
-              } @else {
-                <div class="p-3 border-b border-zinc-800">
-                  <div class="flex gap-1.5">
-                    <select
-                      [value]="activeSetlistId()"
-                      (change)="activeSetlistId.set($any($event.target).value)"
-                      class="flex-1 px-2.5 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-sm">
-                      @for (set of setlists(); track set.id) {
-                        <option [value]="set.id">{{ set.name }} ({{ set.songIds.length }})</option>
-                      }
-                    </select>
-                    <button
-                      (click)="setlistModalOpen.set(true)"
-                      class="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-amber-400">
-                      ⚙️ Gerir
-                    </button>
+                } @else {
+                  <div class="p-2.5 border-b border-zinc-800 shrink-0">
+                    <div class="flex gap-1.5">
+                      <select
+                        [value]="activeSetlistId()"
+                        (change)="onActiveSetlistSelect($any($event.target).value)"
+                        class="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs">
+                        @for (set of setlists(); track set.id) {
+                          <option [value]="set.id">{{ set.name }} ({{ set.songIds.length }})</option>
+                        }
+                      </select>
+                      <button
+                        (click)="openSetlistModal()"
+                        title="Criar, renomear ou organizar setlists"
+                        class="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-amber-400 shrink-0">
+                        ⚙️ Gerir
+                      </button>
+                    </div>
                   </div>
-                </div>
+                }
               }
 
-              <!-- Lista de Músicas -->
-              <div class="flex-1 overflow-y-auto p-2 space-y-1">
+              <!-- LISTA DE MÚSICAS (Compacta em ícones ou Expandida com detalhes) -->
+              <div class="flex-1 overflow-y-auto p-1.5 space-y-1">
                 @for (song of displayedSongs(); track song.id; let idx = $index) {
-                  <div
-                    (click)="selectSong(song.id)"
-                    [class]="activeSongId() === song.id
-                      ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
-                      : 'border-transparent hover:bg-zinc-800/70 text-zinc-200'"
-                    class="w-full text-left p-2.5 rounded-xl border transition flex items-center justify-between cursor-pointer">
-                    <div class="min-w-0 pr-2 flex-1">
-                      <div class="font-semibold text-sm truncate">
-                        @if (navMode() === 'setlist') {
-                          <span class="text-zinc-500 mr-1">{{ idx + 1 }}.</span>
-                        }
-                        {{ song.title }}
+                  @if (sidebarExpanded()) {
+                    <!-- Item Expandido -->
+                    <div
+                      (click)="selectSong(song.id)"
+                      [class]="activeSongId() === song.id
+                        ? 'bg-amber-500/15 border-amber-500/50 text-amber-300'
+                        : 'border-transparent hover:bg-zinc-800/70 text-zinc-200'"
+                      class="w-full text-left p-2 rounded-xl border transition flex items-center justify-between cursor-pointer">
+                      <div class="min-w-0 pr-1.5 flex-1">
+                        <div class="font-semibold text-xs truncate">
+                          @if (navMode() === 'setlist') {
+                            <span class="text-zinc-500 mr-1">{{ idx + 1 }}.</span>
+                          }
+                          {{ song.title }}
+                        </div>
+                        <div class="text-[11px] text-zinc-400 truncate">
+                          {{ song.artist }} • <span class="text-zinc-500">{{ song.genre }}</span>
+                        </div>
                       </div>
-                      <div class="text-xs text-zinc-400 truncate">
-                        {{ song.artist }} • <span class="text-zinc-500">{{ song.genre }}</span>
+
+                      <div class="flex items-center gap-0.5 shrink-0">
+                        @if (navMode() === 'setlist') {
+                          <button (click)="$event.stopPropagation(); moveSongInSetlist(idx, -1)" class="p-1 text-zinc-500 hover:text-white text-[10px]">▲</button>
+                          <button (click)="$event.stopPropagation(); moveSongInSetlist(idx, 1)" class="p-1 text-zinc-500 hover:text-white text-[10px]">▼</button>
+                        }
+                        <span class="text-[11px] font-mono px-1.5 py-0.5 rounded bg-zinc-950 text-amber-400 border border-zinc-800">
+                          {{ getDisplayKey(song) }}
+                        </span>
                       </div>
                     </div>
-
-                    <div class="flex items-center gap-1 shrink-0">
-                      @if (navMode() === 'setlist') {
-                        <button (click)="$event.stopPropagation(); moveSongInSetlist(idx, -1)" class="p-1 text-zinc-500 hover:text-white text-xs">▲</button>
-                        <button (click)="$event.stopPropagation(); moveSongInSetlist(idx, 1)" class="p-1 text-zinc-500 hover:text-white text-xs">▼</button>
-                      }
-                      <span class="text-xs font-mono px-2 py-0.5 rounded bg-zinc-950 text-amber-400 border border-zinc-800">
+                  } @else {
+                    <!-- Item Compacto (Estilo ícones do Chrome Rail) -->
+                    <button
+                      (click)="selectSong(song.id)"
+                      [title]="(idx + 1) + '. ' + song.title + ' (' + song.artist + ') — Tom: ' + getDisplayKey(song)"
+                      [class]="activeSongId() === song.id
+                        ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
+                        : 'bg-zinc-950/60 hover:bg-zinc-800 text-zinc-300 border border-zinc-800/80'"
+                      class="w-full py-2 rounded-xl flex flex-col items-center justify-center transition">
+                      <span class="text-xs font-bold leading-none">
+                        {{ navMode() === 'setlist' ? (idx + 1) : getSongInitials(song.title) }}
+                      </span>
+                      <span
+                        [class]="activeSongId() === song.id ? 'text-zinc-900' : 'text-amber-400'"
+                        class="text-[9px] font-mono mt-0.5 leading-none">
                         {{ getDisplayKey(song) }}
                       </span>
-                    </div>
-                  </div>
+                    </button>
+                  }
                 } @empty {
-                  <div class="text-center text-zinc-500 text-sm py-8 px-4">
-                    Arraste arquivos <strong>.PDF</strong> ou <strong>.TXT</strong> para cá ou clique em <strong>📥 PDF/TXT</strong>.
-                  </div>
+                  @if (sidebarExpanded()) {
+                    <div class="text-center text-zinc-500 text-xs py-6 px-2">
+                      Nenhuma cifra encontrada.
+                    </div>
+                  }
                 }
               </div>
 
-              <!-- Rodapé da Barra Lateral: Backup SD/Memória & Pedal M-Vave -->
-              <div class="p-2.5 border-t border-zinc-800 bg-zinc-950/80 grid grid-cols-2 gap-2">
+              <!-- RODAPÉ RAIL: Backup SD & Pedal M-Vave -->
+              <div class="p-2 border-t border-zinc-800 bg-zinc-950/80 flex flex-col gap-1.5 shrink-0">
                 <button
                   (click)="backupModalOpen.set(true)"
+                  title="Backup / Cartão microSD (.json)"
                   class="py-2 px-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-200 flex items-center justify-center gap-1.5 transition">
-                  💾 Backup / SD
+                  <span>💾</span>
+                  @if (sidebarExpanded()) { <span>Backup / SD</span> }
                 </button>
                 <button
                   (click)="pedalModalOpen.set(true)"
+                  title="Configurar Pedal M-Vave Cube Turner"
                   class="py-2 px-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-amber-400 flex items-center justify-center gap-1.5 transition">
-                  🎛️ Pedal M-Vave
+                  <span>🎛️</span>
+                  @if (sidebarExpanded()) { <span>Pedal M-Vave</span> }
                 </button>
               </div>
             </aside>
           }
 
-          <!-- ÁREA PRINCIPAL DO PALCO -->
+          <!-- =============================================================== -->
+          <!-- ÁREA PRINCIPAL DO PALCO                                         -->
+          <!-- =============================================================== -->
           <main class="flex-1 flex flex-col h-full overflow-hidden">
             @if (activeSong(); as song) {
               <header class="px-4 py-2 border-b border-zinc-800 flex flex-wrap items-center justify-between gap-2 bg-zinc-900/70">
                 
-                <!-- Esquerda: Modo Palco + Título -->
                 <div class="flex items-center gap-2.5 min-w-0">
                   <button
                     (click)="toggleStageMode()"
@@ -1213,14 +1308,12 @@
                   </div>
                 </div>
 
-                <!-- Direita: Seletor Rápido Pedal M-Vave + Fonte + Auto-Scroll + Tom -->
                 <div class="flex items-center gap-1.5 flex-wrap">
-
-                  <!-- Seletor Rápido do Modo do Pedal M-Vave -->
+                  <!-- Seletor Rápido Modo Pedal -->
                   <div class="flex items-center bg-zinc-950 rounded-xl border border-zinc-800 p-1">
                     <button
                       (click)="cyclePedalMode()"
-                      title="Toque para alternar o modo do pedal M-Vave"
+                      title="Alternar modo do pedal M-Vave"
                       class="px-2.5 py-1 rounded-lg bg-zinc-800/90 hover:bg-zinc-700 text-xs font-semibold text-amber-300 transition flex items-center gap-1">
                       @if (pedalConfig().mode === 'smart') {
                         <span>🧠 Inteligente</span>
@@ -1232,13 +1325,13 @@
                     </button>
                     <button
                       (click)="pedalModalOpen.set(true)"
-                      title="Configurar e calibrar pedal M-Vave"
+                      title="Configurar pedal M-Vave"
                       class="px-2 py-1 text-xs text-zinc-400 hover:text-white">
                       ⚙️
                     </button>
                   </div>
 
-                  <!-- Tamanho da Fonte -->
+                  <!-- Fonte -->
                   <div class="flex items-center bg-zinc-950 rounded-xl border border-zinc-800 p-1">
                     <button (click)="changeFontSize(-2)" class="px-2 py-1 text-xs font-bold hover:bg-zinc-800 rounded-lg">A-</button>
                     <span class="px-1.5 text-xs font-mono text-zinc-400">{{ fontSize() }}</span>
@@ -1310,7 +1403,7 @@
           </main>
 
           <!-- =============================================================== -->
-          <!-- MODAL: CONFIGURAÇÃO E CALIBRAGEM DO PEDAL M-VAVE CUBE TURNER    -->
+          <!-- MODAL: CONFIGURAÇÃO E CALIBRAGEM DO PEDAL M-VAVE                -->
           <!-- =============================================================== -->
           @if (pedalModalOpen()) {
             <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -1324,7 +1417,6 @@
                 </div>
 
                 <div class="p-4 space-y-4 overflow-y-auto flex-1">
-                  <!-- 1. Modo de Operação -->
                   <div>
                     <label class="text-xs font-semibold uppercase tracking-wider text-zinc-400 block mb-2">1. Comportamento dos Pedais Principais</label>
                     <div class="grid grid-cols-3 gap-2">
@@ -1349,7 +1441,6 @@
                     </div>
                   </div>
 
-                  <!-- 2. Ajustes de Rolagem -->
                   <div class="grid grid-cols-2 gap-3">
                     <div>
                       <label class="text-xs font-semibold uppercase tracking-wider text-zinc-400 block mb-1.5">Distância do Pulo</label>
@@ -1384,7 +1475,6 @@
                     </div>
                   </div>
 
-                  <!-- 3. Modo Aprendizado (Calibragem Individual das 4 Ações) -->
                   <div>
                     <div class="flex items-center justify-between mb-2">
                       <label class="text-xs font-semibold uppercase tracking-wider text-zinc-400">2. Calibragem Individual (Modo Aprendizado)</label>
@@ -1423,9 +1513,7 @@
                 </div>
 
                 <div class="p-4 border-t border-zinc-800 flex items-center justify-between bg-zinc-950/50">
-                  <button
-                    (click)="resetPedalDefaults()"
-                    class="text-xs text-zinc-400 hover:text-white underline">
+                  <button (click)="resetPedalDefaults()" class="text-xs text-zinc-400 hover:text-white underline">
                     Restaurar Padrão M-Vave
                   </button>
                   <button
@@ -1439,7 +1527,7 @@
           }
 
           <!-- =============================================================== -->
-          <!-- MODAL: BACKUP E RESTAURAÇÃO (MEMÓRIA INTERNA / MICROSD)         -->
+          <!-- MODAL: BACKUP & CARTÃO MICROSD                                  -->
           <!-- =============================================================== -->
           @if (backupModalOpen()) {
             <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -1451,7 +1539,7 @@
 
                 <div class="p-5 space-y-4 text-sm text-zinc-300">
                   <p class="text-xs text-zinc-400 leading-relaxed">
-                    Suas cifras ficam salvas automaticamente na memória interna do navegador para uso 100% offline. Use as opções abaixo para gravar ou restaurar uma cópia de segurança (<code>.json</code>) no seu <strong>cartão microSD</strong> ou pasta interna.
+                    Suas cifras ficam salvas automaticamente na memória interna para uso 100% offline. Use as opções abaixo para gravar ou restaurar uma cópia de segurança (<code>.json</code>) no seu <strong>cartão microSD</strong> ou pasta interna.
                   </p>
 
                   <button
@@ -1473,7 +1561,9 @@
             </div>
           }
 
-          <!-- MODAL EDITOR -->
+          <!-- =============================================================== -->
+          <!-- MODAL EDITOR                                                    -->
+          <!-- =============================================================== -->
           @if (editorOpen()) {
             <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
               <div class="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
@@ -1566,7 +1656,9 @@
             </div>
           }
 
-          <!-- MODAL SETLISTS -->
+          <!-- =============================================================== -->
+          <!-- MODAL SETLISTS (COM EDIÇÃO DE NOME DO SETLIST)                  -->
+          <!-- =============================================================== -->
           @if (setlistModalOpen()) {
             <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
               <div class="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
@@ -1576,24 +1668,50 @@
                 </div>
 
                 <div class="p-4 space-y-4 overflow-y-auto flex-1">
-                  <div class="flex gap-2">
-                    <input
-                      type="text"
-                      [value]="newSetlistName()"
-                      (input)="newSetlistName.set($any($event.target).value)"
-                      placeholder="Nome do novo setlist..."
-                      class="flex-1 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-sm"
-                    />
-                    <button (click)="createSetlist()" class="px-4 py-2 rounded-xl bg-amber-500 text-zinc-950 font-bold text-sm">+ Criar</button>
+                  <!-- Criar Novo Setlist -->
+                  <div>
+                    <label class="text-xs text-zinc-400 block mb-1">Criar novo setlist</label>
+                    <div class="flex gap-2">
+                      <input
+                        type="text"
+                        [value]="newSetlistName()"
+                        (input)="newSetlistName.set($any($event.target).value)"
+                        (keydown.enter)="createSetlist()"
+                        placeholder="Nome do novo setlist..."
+                        class="flex-1 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-sm"
+                      />
+                      <button (click)="createSetlist()" class="px-4 py-2 rounded-xl bg-amber-500 text-zinc-950 font-bold text-sm">+ Criar</button>
+                    </div>
                   </div>
 
                   @if (currentSetlist(); as set) {
-                    <div class="flex items-center justify-between pt-2 border-t border-zinc-800">
-                      <span class="text-sm text-zinc-300">Músicas em: <strong class="text-amber-400">{{ set.name }}</strong></span>
-                      <button (click)="deleteCurrentSetlist()" class="text-xs text-red-400 hover:underline">Excluir setlist</button>
+                    <!-- Renomear ou Excluir o Setlist Atual -->
+                    <div class="pt-3 border-t border-zinc-800 space-y-2">
+                      <div class="flex items-center justify-between">
+                        <label class="text-xs text-zinc-400">Editar nome do setlist selecionado</label>
+                        <button (click)="deleteCurrentSetlist()" class="text-xs text-red-400 hover:underline">
+                          🗑️ Excluir setlist
+                        </button>
+                      </div>
+                      <div class="flex gap-2">
+                        <input
+                          type="text"
+                          [value]="editSetlistName()"
+                          (input)="editSetlistName.set($any($event.target).value)"
+                          (keydown.enter)="renameCurrentSetlist()"
+                          class="flex-1 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-sm font-semibold text-amber-300"
+                        />
+                        <button
+                          (click)="renameCurrentSetlist()"
+                          class="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-amber-400 font-semibold text-xs">
+                          ✏️ Salvar Nome
+                        </button>
+                      </div>
                     </div>
 
-                    <div class="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                    <!-- Marcar/Desmarcar Músicas do Setlist -->
+                    <div class="space-y-1.5 max-h-64 overflow-y-auto pr-1 pt-2 border-t border-zinc-800">
+                      <div class="text-xs text-zinc-400 mb-1">Músicas incluídas em <strong>{{ set.name }}</strong>:</div>
                       @for (song of songs(); track song.id) {
                         <label class="flex items-center justify-between p-2.5 rounded-xl bg-zinc-950 border border-zinc-800 cursor-pointer hover:border-zinc-700">
                           <div class="flex items-center gap-3">
