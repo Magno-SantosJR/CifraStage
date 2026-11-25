@@ -73,7 +73,7 @@
 
       if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
         const swCode = `
-          const CACHE_NAME = 'cifrastage-offline-v2';
+          const CACHE_NAME = 'cifrastage-offline-v3';
           self.addEventListener('install', () => self.skipWaiting());
           self.addEventListener('activate', (e) => e.waitUntil(clients.claim()));
           self.addEventListener('fetch', (e) => {
@@ -187,6 +187,23 @@
         }
       }
       return 'C';
+    }
+
+    // Verifica se há acordes separados por espaço (ex: "A7M9 69") para orientar o usuário sem alterar o motor
+    function checkFormattingHints(rawContent) {
+      if (!rawContent) return [];
+      const hints = new Set();
+      const lines = rawContent.split('\n');
+    
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        // Procura padrão de acorde seguido de espaço e extensão numérica solta (ex: "A7M9 69" ou "G7 11+")
+        const splitChordMatch = line.match(/\b([A-G][#b]?[a-zA-Z0-9+#b()°ø-]*)\s+(69|7M|9|11\+|13|b9|#9|#11|b13)\b/);
+        if (splitChordMatch) {
+          hints.add(`Linha ${i + 1}: "${splitChordMatch[1]} ${splitChordMatch[2]}" está separado por espaço. Escreva junto como "${splitChordMatch[1]}(${splitChordMatch[2]})".`);
+        }
+      }
+      return Array.from(hints).slice(0, 3); // Mostra até 3 dicas para não poluir
     }
 
     // =========================================================================
@@ -446,6 +463,9 @@
             return { id: index, isChordLine: chordLine, segments };
           });
         });
+
+        // COMPUTED: Analisa o texto do editor em tempo real e gera dicas de formatação
+        this.editorHints = computed(() => checkFormattingHints(this.formContent()));
 
         effect(() => localStorage.setItem('cifrastage_songs', JSON.stringify(this.songs())));
         effect(() => localStorage.setItem('cifrastage_setlists', JSON.stringify(this.setlists())));
@@ -819,7 +839,13 @@
             this.navMode.set('library');
             this.selectedGenre.set('');
             this.selectedArtist.set('');
-            this.showToast(`${importedSongs.length} cifra(s) importada(s)!`);
+            
+            const allHints = importedSongs.flatMap(s => checkFormattingHints(s.rawContent));
+            if (allHints.length > 0) {
+              this.showToast(`⚠️ ${importedSongs.length} cifra(s) importada(s). Dica: junte acordes com espaço (ex: A7M(69)) em ✏️ Editar.`);
+            } else {
+              this.showToast(`${importedSongs.length} cifra(s) importada(s) com sucesso!`);
+            }
           }
         } catch (err) {
           this.showToast('Erro ao ler arquivo: ' + err.message);
@@ -1628,6 +1654,24 @@
 
                   <div>
                     <label class="text-xs text-zinc-400 block mb-1">Cifra e Letra</label>
+
+                    <!-- Guia Rápido de Padrão de Cifra -->
+                    <div class="mb-2 p-2.5 rounded-xl bg-zinc-950/90 border border-zinc-800 text-[11px] text-zinc-400 flex flex-wrap items-center justify-between gap-2">
+                      <span>
+                        💡 <strong class="text-zinc-200">Padrão CifraStage:</strong> Acordes acima da letra, sem espaços internos (ex: <code class="text-amber-400">A7M(69)</code>, <code class="text-amber-400">D7(b9)</code>, <code class="text-amber-400">G/B</code>) e tags entre colchetes (<code class="text-sky-400">[Intro]</code>).
+                      </span>
+                    </div>
+
+                    <!-- Alerta automático se detectar acorde separado por espaço -->
+                    @if (editorHints().length > 0) {
+                      <div class="mb-2 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/40 text-xs text-amber-300 space-y-1">
+                        <div class="font-bold">⚠️ Ajuste sugerido para transposição perfeita:</div>
+                        @for (hint of editorHints(); track hint) {
+                          <div class="text-[11px]">• {{ hint }}</div>
+                        }
+                      </div>
+                    }
+
                     <textarea
                       rows="14"
                       [value]="formContent()"
