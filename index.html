@@ -73,7 +73,7 @@
 
       if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
         const swCode = `
-          const CACHE_NAME = 'cifrastage-offline-v3';
+          const CACHE_NAME = 'cifrastage-offline-v4';
           self.addEventListener('install', () => self.skipWaiting());
           self.addEventListener('activate', (e) => e.waitUntil(clients.claim()));
           self.addEventListener('fetch', (e) => {
@@ -342,27 +342,7 @@ function autoFixChordFormatting(rawContent) {
       }
       return { title: cleanName, artist: 'Importado' };
     }
-
-    // Corrige acordes quebrados por espaço (ex: "A7M9   69" -> "A7M9(69)") preservando o alinhamento
-    function autoFixChordFormatting(rawContent) {
-      if (!rawContent) return rawContent;
-      return rawContent.split('\n').map(line => {
-        return line.replace(
-          /\b([A-G][#b]?[a-zA-Z0-9+#b()°ø-]*)(\s+)(69|7M|9|11\+|13|b9|#9|#11|b13)\b(\s*)/g,
-          (match, chord, innerSpaces, ext, trailingSpaces) => {
-            const fixed = `${chord}(${ext})`;
-            const diff = fixed.length - (chord.length + innerSpaces.length + ext.length);
-            if (!trailingSpaces) return fixed;
-            if (diff > 0) {
-              return fixed + ' '.repeat(Math.max(1, trailingSpaces.length - diff));
-            } else if (diff < 0) {
-              return fixed + ' '.repeat(trailingSpaces.length + Math.abs(diff));
-            }
-            return fixed + trailingSpaces;
-          }
-        );
-      }).join('\n');
-    }
+    
 
     // =========================================================================
     // 3. DADOS INICIAIS E CONFIGURAÇÃO DO PEDAL
