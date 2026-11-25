@@ -289,6 +289,27 @@
       return { title: cleanName, artist: 'Importado' };
     }
 
+    // Corrige acordes quebrados por espaço (ex: "A7M9   69" -> "A7M9(69)") preservando o alinhamento
+    function autoFixChordFormatting(rawContent) {
+      if (!rawContent) return rawContent;
+      return rawContent.split('\n').map(line => {
+        return line.replace(
+          /\b([A-G][#b]?[a-zA-Z0-9+#b()°ø-]*)(\s+)(69|7M|9|11\+|13|b9|#9|#11|b13)\b(\s*)/g,
+          (match, chord, innerSpaces, ext, trailingSpaces) => {
+            const fixed = `${chord}(${ext})`;
+            const diff = fixed.length - (chord.length + innerSpaces.length + ext.length);
+            if (!trailingSpaces) return fixed;
+            if (diff > 0) {
+              return fixed + ' '.repeat(Math.max(1, trailingSpaces.length - diff));
+            } else if (diff < 0) {
+              return fixed + ' '.repeat(trailingSpaces.length + Math.abs(diff));
+            }
+            return fixed + trailingSpaces;
+          }
+        );
+      }).join('\n');
+    }
+
     // =========================================================================
     // 3. DADOS INICIAIS E CONFIGURAÇÃO DO PEDAL
     // =========================================================================
@@ -813,6 +834,8 @@
             }
 
             rawContent = rawContent.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+            rawContent = autoFixChordFormatting(rawContent); // Corrige automaticamente na importação!
+            
             const meta = parseMetadataFromFilename(file.name);
             const detectedKey = detectOriginalKey(rawContent);
 
@@ -1021,6 +1044,11 @@
           this.activeSongId.set(newId);
         }
         this.editorOpen.set(false);
+      }
+
+      fixEditorContent() {
+        this.formContent.set(autoFixChordFormatting(this.formContent()));
+        this.showToast('✨ Acordes ajustados automaticamente!');
       }
 
       deleteSong(songId) {
@@ -1665,7 +1693,15 @@
                     <!-- Alerta automático se detectar acorde separado por espaço -->
                     @if (editorHints().length > 0) {
                       <div class="mb-2 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/40 text-xs text-amber-300 space-y-1">
-                        <div class="font-bold">⚠️ Ajuste sugerido para transposição perfeita:</div>
+                        <div class="flex items-center justify-between gap-2">
+                          <span class="font-bold">⚠️ Ajuste sugerido para transposição perfeita:</span>
+                          <button
+                            type="button"
+                            (click)="fixEditorContent()"
+                            class="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-[11px] transition shrink-0">
+                            ✨ Corrigir Agora
+                          </button>
+                        </div>
                         @for (hint of editorHints(); track hint) {
                           <div class="text-[11px]">• {{ hint }}</div>
                         }
