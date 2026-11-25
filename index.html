@@ -189,23 +189,77 @@
       return 'C';
     }
 
-    // Verifica se há acordes separados por espaço (ex: "A7M9 69") para orientar o usuário sem alterar o motor
-    function checkFormattingHints(rawContent) {
-      if (!rawContent) return [];
-      const hints = new Set();
-      const lines = rawContent.split('\n');
-    
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        // Procura padrão de acorde seguido de espaço e extensão numérica solta (ex: "A7M9 69" ou "G7 11+")
-        const splitChordMatch = line.match(/\b([A-G][#b]?[a-zA-Z0-9+#b()°ø-]*)\s+(69|7M|9|11\+|13|b9|#9|#11|b13)\b/);
-        if (splitChordMatch) {
-          hints.add(`Linha ${i + 1}: "${splitChordMatch[1]} ${splitChordMatch[2]}" está separado por espaço. Escreva junto como "${splitChordMatch[1]}(${splitChordMatch[2]})".`);
-        }
-      }
-      return Array.from(hints).slice(0, 3); // Mostra até 3 dicas para não poluir
+    // 1. Verifica padrões fora do formato brasileiro limpo (ex: "A7M9 69", "G#m75-", "F7M11+")
+function checkFormattingHints(rawContent) {
+  if (!rawContent) return [];
+  const hints = new Set();
+  const lines = rawContent.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Caso 1: Acorde com 9 seguido de 69 solto (ex: "A7M9 69" -> "A7M(9) A6(9)")
+    const splitDoubleChord = line.match(/\b([A-G][#b]?)(7M|7|m7)?9\s+69\b/);
+    if (splitDoubleChord) {
+      const root = splitDoubleChord[1];
+      const qual = splitDoubleChord[2] || '7M';
+      hints.add(`Linha ${i + 1}: "${splitDoubleChord[0]}" parece ser dois acordes: "${root}${qual}(9) ${root}6(9)".`);
     }
 
+    // Caso 2: Notação antiga/compacta sem parênteses (ex: "G#m75-", "F7M11+", "A7M9")
+    const legacyNotation = line.match(/\b([A-G][#b]?)(m75-|7M11\+|711\+|7M9)\b/);
+    if (legacyNotation) {
+      hints.add(`Linha ${i + 1}: "${legacyNotation[0]}" pode ser padronizado com parênteses (ex: m7(b5), 7M(#11), 7M(9)).`);
+    }
+  }
+  return Array.from(hints).slice(0, 4);
+}
+
+// 2. Padroniza e corrige automaticamente preservando o alinhamento horizontal
+function autoFixChordFormatting(rawContent) {
+  if (!rawContent) return rawContent;
+
+  return rawContent.split('\n').map(line => {
+    let updated = line;
+
+    // Passo A: Separa "A7M9   69" em "A7M(9)  A6(9)" mantendo a tônica do segundo acorde
+    updated = updated.replace(
+      /\b([A-G][#b]?)(7M|7|m7)?9(\s+)69\b/g,
+      (match, root, qual, spaces) => {
+        const first = `${root}${qual || '7M'}(9)`;
+        const second = `${root}6(9)`;
+        const gap = spaces.length >= 2 ? ' '.repeat(Math.max(2, spaces.length - 1)) : '  ';
+        return `${first}${gap}${second}`;
+      }
+    );
+
+    // Passo B: Padroniza sufixos sem parênteses (m75- -> m7(b5), 7M11+ -> 7M(#11), 711+ -> 7(#11), 7M9 -> 7M(9))
+    updated = updated.replace(
+      /\b([A-G][#b]?)(m75-|7M11\+|711\+|7M9)(\/[A-G][#b]?)?(\s*)/g,
+      (match, root, suffix, bass, trailingSpaces) => {
+        const map = {
+          'm75-': 'm7(b5)',
+          '7M11+': '7M(#11)',
+          '711+': '7(#11)',
+          '7M9': '7M(9)'
+        };
+        const fixed = `${root}${map[suffix] || suffix}${bass || ''}`;
+        const origLen = root.length + suffix.length + (bass ? bass.length : 0);
+        const diff = fixed.length - origLen;
+
+        if (!trailingSpaces) return fixed;
+        if (diff > 0) {
+          return fixed + ' '.repeat(Math.max(1, trailingSpaces.length - diff));
+        } else if (diff < 0) {
+          return fixed + ' '.repeat(trailingSpaces.length + Math.abs(diff));
+        }
+        return fixed + trailingSpaces;
+      }
+    );
+
+    return updated;
+  }).join('\n');
+}
     // =========================================================================
     // 2. EXTRATOR DE PDF COM ALINHAMENTO GEOMÉTRICO (X e Y)
     // =========================================================================
@@ -1686,7 +1740,7 @@
                     <!-- Guia Rápido de Padrão de Cifra -->
                     <div class="mb-2 p-2.5 rounded-xl bg-zinc-950/90 border border-zinc-800 text-[11px] text-zinc-400 flex flex-wrap items-center justify-between gap-2">
                       <span>
-                        💡 <strong class="text-zinc-200">Padrão CifraStage:</strong> Acordes acima da letra, sem espaços internos (ex: <code class="text-amber-400">A7M(69)</code>, <code class="text-amber-400">D7(b9)</code>, <code class="text-amber-400">G/B</code>) e tags entre colchetes (<code class="text-sky-400">[Intro]</code>).
+                        💡 <strong class="text-zinc-200">Padrão CifraStage:</strong> Use parênteses nas tensões (<code class="text-amber-400">A7M(9)</code>, <code class="text-amber-400">A6(9)</code>, <code class="text-amber-400">G#m7(b5)</code>, <code class="text-amber-400">F7M(#11)</code>) e tags entre colchetes (<code class="text-sky-400">[Intro]</code>, <code class="text-sky-400">[Refrão]</code>).
                       </span>
                     </div>
 
